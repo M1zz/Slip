@@ -48,12 +48,12 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Vault") {
+            Section("Notes Folder") {
                 if let vault = appState.vault {
                     LabeledContent("Location", value: vault.root.path)
                         .textSelection(.enabled)
                 }
-                Button("Choose different vault…") {
+                Button("Choose different folder…") {
                     VaultPickerView.chooseVault { url in
                         appState.openVault(at: url)
                     }

@@ -12,7 +12,7 @@ struct VaultPickerView: View {
             Text("Welcome to Slip")
                 .font(.largeTitle)
                 .fontWeight(.semibold)
-            Text("Pick a folder to use as your vault.\nSlip reads and writes plain Markdown files — your data stays yours.")
+            Text("Pick a folder to keep your notes in.\nSlip reads and writes plain Markdown files — your data stays yours.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Button {
@@ -20,7 +20,7 @@ struct VaultPickerView: View {
                     appState.openVault(at: url)
                 }
             } label: {
-                Text("Choose Vault Folder")
+                Text("Choose Notes Folder")
                     .frame(minWidth: 180)
             }
             .controlSize(.large)
@@ -36,7 +36,7 @@ struct VaultPickerView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Use as Vault"
+        panel.prompt = "Use This Folder"
         panel.message = "Choose a folder containing your markdown notes."
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }

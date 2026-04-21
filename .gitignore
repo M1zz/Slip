@@ -1,0 +1,24 @@
+# XcodeGen output — regenerate with `xcodegen generate`
+Slip.xcodeproj/
+Slip.xcworkspace/
+
+# SPM
+.build/
+.swiftpm/
+Package.resolved
+SlipCore/.build/
+SlipCore/.swiftpm/
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

@@ -141,6 +141,11 @@ final class AppState: ObservableObject {
         }
     }
 
+    func graphSnapshot() -> NoteIndex.GraphSnapshot? {
+        guard let index else { return nil }
+        return try? index.graphSnapshot()
+    }
+
     private func applyTagFilter() {
         guard let index else {
             noteList = allNoteIDs

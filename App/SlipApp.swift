@@ -27,12 +27,28 @@ struct SlipApp: App {
             CommandMenu("Rediscover") {
                 Button("Today's Rediscovery") { appState.refreshRediscovery() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                Divider()
+                ShowGraphCommand()
             }
+        }
+
+        Window("Graph", id: "graph") {
+            GraphView()
+                .environmentObject(appState)
+                .frame(minWidth: 600, minHeight: 500)
         }
 
         Settings {
             SettingsView()
                 .environmentObject(appState)
         }
+    }
+}
+
+private struct ShowGraphCommand: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Show Graph") { openWindow(id: "graph") }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
     }
 }

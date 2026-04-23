@@ -230,6 +230,66 @@ public final class NoteIndex {
         }
     }
 
+    public struct GraphSnapshot: Sendable {
+        public struct Node: Hashable, Sendable {
+            public let id: NoteID
+            public let title: String
+            public let degree: Int
+            public init(id: NoteID, title: String, degree: Int) {
+                self.id = id; self.title = title; self.degree = degree
+            }
+        }
+        public struct Edge: Hashable, Sendable {
+            public let from: NoteID
+            public let to: NoteID
+            public init(from: NoteID, to: NoteID) {
+                self.from = from; self.to = to
+            }
+        }
+        public let nodes: [Node]
+        public let edges: [Edge]
+    }
+
+    /// Snapshot of the wikilink graph — only includes edges whose endpoints
+    /// both exist in the notes table (orphan references are dropped).
+    public func graphSnapshot() throws -> GraphSnapshot {
+        try dbQueue.read { db in
+            let nodeRows = try Row.fetchAll(db, sql: """
+                SELECT id, title FROM notes
+            """)
+            let edgeRows = try Row.fetchAll(db, sql: """
+                SELECT l.source_id, l.target_id
+                FROM links l
+                JOIN notes n1 ON n1.id = l.source_id
+                JOIN notes n2 ON n2.id = l.target_id
+                WHERE l.kind = 'wikilink'
+            """)
+
+            let edges: [GraphSnapshot.Edge] = edgeRows.map {
+                GraphSnapshot.Edge(
+                    from: NoteID(relativePath: $0["source_id"]),
+                    to: NoteID(relativePath: $0["target_id"])
+                )
+            }
+
+            var degree: [NoteID: Int] = [:]
+            for e in edges {
+                degree[e.from, default: 0] += 1
+                degree[e.to, default: 0] += 1
+            }
+
+            let nodes: [GraphSnapshot.Node] = nodeRows.map { row in
+                let id = NoteID(relativePath: row["id"])
+                return GraphSnapshot.Node(
+                    id: id,
+                    title: row["title"],
+                    degree: degree[id] ?? 0
+                )
+            }
+            return GraphSnapshot(nodes: nodes, edges: edges)
+        }
+    }
+
     public func noteIDs(withTag tag: String) throws -> [NoteID] {
         try dbQueue.read { db in
             let rows = try Row.fetchAll(db, sql: """

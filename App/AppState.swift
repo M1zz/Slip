@@ -19,6 +19,13 @@ final class AppState: ObservableObject {
     @Published var backlinks: [NoteID] = []
     @Published var rediscovery: [RediscoveryEngine.RediscoveryCard] = []
     @Published var titleByID: [NoteID: String] = [:]
+    @Published var tags: [NoteIndex.TagCount] = []
+    @Published var selectedTag: String? {
+        didSet { applyTagFilter() }
+    }
+
+    /// Full list from the index; `noteList` reflects the current tag filter.
+    private var allNoteIDs: [NoteID] = []
 
     // MARK: - Services
 
@@ -122,14 +129,27 @@ final class AppState: ObservableObject {
     private func refreshAfterIndex() {
         guard let index else { return }
         do {
-            let ids = try index.allNoteIDs()
-            self.noteList = ids
+            self.allNoteIDs = try index.allNoteIDs()
             self.titleByID = Dictionary(uniqueKeysWithValues:
                 try index.allMetrics().map { ($0.id, $0.title) }
             )
+            self.tags = (try? index.listTags()) ?? []
+            applyTagFilter()
             refreshRediscovery()
         } catch {
             NSLog("Refresh failed: \(error)")
+        }
+    }
+
+    private func applyTagFilter() {
+        guard let index else {
+            noteList = allNoteIDs
+            return
+        }
+        if let tag = selectedTag {
+            noteList = (try? index.noteIDs(withTag: tag)) ?? []
+        } else {
+            noteList = allNoteIDs
         }
     }
 

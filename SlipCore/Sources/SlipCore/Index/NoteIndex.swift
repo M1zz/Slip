@@ -209,6 +209,40 @@ public final class NoteIndex {
         }
     }
 
+    public struct TagCount: Hashable, Sendable {
+        public let tag: String
+        public let count: Int
+        public init(tag: String, count: Int) {
+            self.tag = tag
+            self.count = count
+        }
+    }
+
+    public func listTags() throws -> [TagCount] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT tag, COUNT(*) AS cnt
+                FROM tags
+                GROUP BY tag
+                ORDER BY cnt DESC, tag ASC
+            """)
+            return rows.map { TagCount(tag: $0["tag"], count: $0["cnt"]) }
+        }
+    }
+
+    public func noteIDs(withTag tag: String) throws -> [NoteID] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT t.note_id
+                FROM tags t
+                JOIN notes n ON n.id = t.note_id
+                WHERE t.tag = ?
+                ORDER BY n.modified_at DESC
+            """, arguments: [tag])
+            return rows.map { NoteID(relativePath: $0["note_id"]) }
+        }
+    }
+
     public func search(_ query: String, limit: Int = 50) throws -> [NoteID] {
         // FTS5 requires escaping — wrap user input as a phrase query.
         let escaped = query

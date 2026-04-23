@@ -25,9 +25,34 @@ struct SidebarView: View {
                 get: { appState.currentNoteID },
                 set: { if let id = $0 { appState.openNote(id) } }
             )) {
-                ForEach(displayed, id: \.self) { id in
-                    NoteRow(id: id, title: appState.titleByID[id] ?? id.relativePath)
-                        .tag(id)
+                Section(notesSectionTitle) {
+                    ForEach(displayed, id: \.self) { id in
+                        NoteRow(id: id, title: appState.titleByID[id] ?? id.relativePath)
+                            .tag(id)
+                    }
+                }
+
+                if !appState.tags.isEmpty {
+                    Section("Tags") {
+                        TagRow(
+                            label: "All Notes",
+                            count: nil,
+                            isSelected: appState.selectedTag == nil,
+                            systemImage: "tray.full"
+                        ) {
+                            appState.selectedTag = nil
+                        }
+                        ForEach(appState.tags, id: \.tag) { tc in
+                            TagRow(
+                                label: "#\(tc.tag)",
+                                count: tc.count,
+                                isSelected: appState.selectedTag == tc.tag,
+                                systemImage: "tag"
+                            ) {
+                                appState.selectedTag = tc.tag
+                            }
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
@@ -40,6 +65,13 @@ struct SidebarView: View {
                 .help("New Note (⌘N)")
             }
         }
+    }
+
+    private var notesSectionTitle: String {
+        if let tag = appState.selectedTag {
+            return "Notes · #\(tag)"
+        }
+        return "Notes"
     }
 }
 
@@ -55,5 +87,35 @@ private struct NoteRow: View {
             Text(title)
                 .lineLimit(1)
         }
+    }
+}
+
+private struct TagRow: View {
+    let label: String
+    let count: Int?
+    let isSelected: Bool
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .font(.caption)
+                Text(label)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .lineLimit(1)
+                Spacer()
+                if let count {
+                    Text("\(count)")
+                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .monospacedDigit()
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

@@ -6,12 +6,28 @@ import SlipCore
 /// Simulation runs for ~400 ticks (≈6.5s at 60fps) after load then freezes.
 /// Layout is O(n²) repulsion — fine up to a few hundred notes. Replace with
 /// Barnes–Hut if vaults grow past ~1k.
+///
+/// Interactions:
+/// - Tap a node → open that note in the main window.
+/// - Drag a node → pin it to the cursor (simulation keeps running on others).
+/// - Drag the empty background → pan.
+/// - Pinch → zoom.
+/// - When `appState.selectedTag` is set, non-matching nodes fade so the
+///   user can see where that tag lives inside the full graph.
 struct GraphView: View {
     @EnvironmentObject var appState: AppState
     @State private var nodes: [GraphNode] = []
     @State private var edges: [(Int, Int)] = []
     @State private var ticksRemaining: Int = 400
     @State private var loaded = false
+
+    // Viewport transform.
+    @State private var panOffset: CGSize = .zero
+    @State private var zoom: CGFloat = 1.0
+    @State private var zoomAtGestureStart: CGFloat = 1.0
+
+    // Drag state. Decided once at the start of a drag based on where it began.
+    @State private var dragMode: DragMode = .idle
 
     private let timer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
 
@@ -31,22 +47,53 @@ struct GraphView: View {
                         .multilineTextAlignment(.center)
                         .padding()
                 }
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        controls
+                    }
+                    .padding(10)
+                }
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onEnded { handleTap(at: $0.location, in: geo.size) }
+                SimultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in handleDragChanged(value, viewSize: geo.size) }
+                        .onEnded   { value in handleDragEnded(value, viewSize: geo.size) },
+                    MagnificationGesture()
+                        .onChanged { value in zoom = clampZoom(zoomAtGestureStart * value) }
+                        .onEnded   { _ in zoomAtGestureStart = zoom }
+                )
             )
         }
         .navigationTitle("Graph")
-        .task {
-            await loadSnapshot()
-        }
+        .task { await loadSnapshot() }
         .onReceive(timer) { _ in
             guard loaded, ticksRemaining > 0, !nodes.isEmpty else { return }
             tick()
             ticksRemaining -= 1
         }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 6) {
+            Button { zoom = clampZoom(zoom * 1.2); zoomAtGestureStart = zoom } label: {
+                Image(systemName: "plus.magnifyingglass")
+            }
+            Button { zoom = clampZoom(zoom / 1.2); zoomAtGestureStart = zoom } label: {
+                Image(systemName: "minus.magnifyingglass")
+            }
+            Button { resetViewport() } label: {
+                Image(systemName: "scope")
+            }
+            .help("Reset view")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Load
@@ -71,6 +118,7 @@ struct GraphView: View {
                 id: n.id,
                 title: n.title,
                 degree: n.degree,
+                tags: Set(n.tags),
                 position: CGPoint(
                     x: CGFloat(cos(angle)) * (radius + jitter),
                     y: CGFloat(sin(angle)) * (radius + jitter)
@@ -132,9 +180,14 @@ struct GraphView: View {
             forces[i].dy -= nodes[i].position.y * kCenter
         }
 
-        // Integrate with damping.
+        // Integrate with damping. Skip the node the user is currently dragging.
         let damping: CGFloat = 0.82
+        let pinned: Int? = {
+            if case .node(let idx, _) = dragMode { return idx }
+            return nil
+        }()
         for i in 0..<count {
+            if i == pinned { continue }
             nodes[i].velocity.dx = (nodes[i].velocity.dx + forces[i].dx * dt) * damping
             nodes[i].velocity.dy = (nodes[i].velocity.dy + forces[i].dy * dt) * damping
             nodes[i].position.x += nodes[i].velocity.dx
@@ -142,33 +195,75 @@ struct GraphView: View {
         }
     }
 
+    // MARK: - Transforms
+
+    private func viewPoint(for graph: CGPoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: graph.x * zoom + panOffset.width + size.width / 2,
+            y: graph.y * zoom + panOffset.height + size.height / 2
+        )
+    }
+
+    private func graphPoint(for view: CGPoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: (view.x - size.width / 2 - panOffset.width) / zoom,
+            y: (view.y - size.height / 2 - panOffset.height) / zoom
+        )
+    }
+
+    private func clampZoom(_ z: CGFloat) -> CGFloat {
+        min(max(z, 0.25), 4.0)
+    }
+
+    private func resetViewport() {
+        panOffset = .zero
+        zoom = 1.0
+        zoomAtGestureStart = 1.0
+    }
+
     // MARK: - Render
 
     private func draw(ctx: GraphicsContext, size: CGSize) {
-        let cx = size.width / 2
-        let cy = size.height / 2
         let currentID = appState.currentNoteID
+        let filterTag = appState.selectedTag
 
         // Edges under nodes.
-        let edgePath = Path { p in
-            for (a, b) in edges {
-                p.move(to: CGPoint(x: nodes[a].position.x + cx, y: nodes[a].position.y + cy))
-                p.addLine(to: CGPoint(x: nodes[b].position.x + cx, y: nodes[b].position.y + cy))
-            }
+        var edgePath = Path()
+        for (a, b) in edges {
+            edgePath.move(to: viewPoint(for: nodes[a].position, in: size))
+            edgePath.addLine(to: viewPoint(for: nodes[b].position, in: size))
         }
-        ctx.stroke(edgePath, with: .color(.secondary.opacity(0.35)), lineWidth: 1)
+        ctx.stroke(edgePath, with: .color(.secondary.opacity(filterTag == nil ? 0.35 : 0.15)), lineWidth: 1)
 
         for node in nodes {
-            let p = CGPoint(x: node.position.x + cx, y: node.position.y + cy)
-            let radius: CGFloat = 4 + min(12, CGFloat(log2(Double(node.degree + 2))) * 2.2)
+            let p = viewPoint(for: node.position, in: size)
+            let radius: CGFloat = (4 + min(12, CGFloat(log2(Double(node.degree + 2))) * 2.2)) * max(0.6, min(zoom, 1.5))
             let rect = CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2)
+
+            let matchesFilter = filterTag.map(node.tags.contains) ?? true
             let isCurrent = node.id == currentID
-            let fill: Color = isCurrent ? .accentColor : (node.degree == 0 ? .secondary : .primary.opacity(0.8))
+
+            let fill: Color
+            if isCurrent {
+                fill = .accentColor
+            } else if filterTag != nil && matchesFilter {
+                fill = .accentColor.opacity(0.85)
+            } else if !matchesFilter {
+                fill = .secondary.opacity(0.25)
+            } else if node.degree == 0 {
+                fill = .secondary
+            } else {
+                fill = .primary.opacity(0.8)
+            }
             ctx.fill(Path(ellipseIn: rect), with: .color(fill))
 
+            // Only label if the node isn't dimmed away.
+            guard matchesFilter || isCurrent else { continue }
             var label = Text(node.title).font(.system(size: 11))
             if isCurrent {
                 label = label.bold().foregroundColor(.accentColor)
+            } else if filterTag != nil {
+                label = label.foregroundColor(.accentColor.opacity(0.9))
             } else {
                 label = label.foregroundColor(.secondary)
             }
@@ -176,24 +271,81 @@ struct GraphView: View {
         }
     }
 
-    // MARK: - Interaction
+    // MARK: - Gestures
 
-    private func handleTap(at location: CGPoint, in size: CGSize) {
-        let cx = size.width / 2
-        let cy = size.height / 2
+    private enum DragMode {
+        case idle
+        case pendingTap(location: CGPoint)
+        case node(index: Int, pointerGraphOffset: CGVector) // offset from node center at grab time
+        case pan(initialOffset: CGSize)
+    }
+
+    private func handleDragChanged(_ value: DragGesture.Value, viewSize size: CGSize) {
+        switch dragMode {
+        case .idle:
+            // Decide what this gesture is. If it starts on a node, we grab it.
+            if let hit = nodeIndex(at: value.startLocation, in: size) {
+                let gp = graphPoint(for: value.startLocation, in: size)
+                let offset = CGVector(
+                    dx: gp.x - nodes[hit].position.x,
+                    dy: gp.y - nodes[hit].position.y
+                )
+                dragMode = .node(index: hit, pointerGraphOffset: offset)
+            } else {
+                // No node hit — start as a tap (might upgrade to pan on movement).
+                dragMode = .pendingTap(location: value.startLocation)
+            }
+            // Re-enter with the decided mode.
+            handleDragChanged(value, viewSize: size)
+
+        case .pendingTap(let start):
+            let dx = value.location.x - start.x
+            let dy = value.location.y - start.y
+            if dx * dx + dy * dy > 16 {  // >4pt movement — treat as pan.
+                dragMode = .pan(initialOffset: panOffset)
+                handleDragChanged(value, viewSize: size)
+            }
+
+        case .node(let idx, let offset):
+            let gp = graphPoint(for: value.location, in: size)
+            nodes[idx].position = CGPoint(x: gp.x - offset.dx, y: gp.y - offset.dy)
+            nodes[idx].velocity = .zero
+
+        case .pan(let initial):
+            panOffset = CGSize(
+                width: initial.width + value.translation.width,
+                height: initial.height + value.translation.height
+            )
+        }
+    }
+
+    private func handleDragEnded(_ value: DragGesture.Value, viewSize size: CGSize) {
+        switch dragMode {
+        case .pendingTap(let loc):
+            // A tap without movement — open the node under the cursor, if any.
+            if let hit = nodeIndex(at: loc, in: size) {
+                appState.openNote(nodes[hit].id)
+            }
+        case .idle, .node, .pan:
+            break
+        }
+        dragMode = .idle
+    }
+
+    private func nodeIndex(at location: CGPoint, in size: CGSize) -> Int? {
+        // Threshold in view space, scaled by zoom so it feels consistent.
         let threshold: CGFloat = 18
         var best: (index: Int, dist: CGFloat)? = nil
         for (i, node) in nodes.enumerated() {
-            let dx = (node.position.x + cx) - location.x
-            let dy = (node.position.y + cy) - location.y
+            let vp = viewPoint(for: node.position, in: size)
+            let dx = vp.x - location.x
+            let dy = vp.y - location.y
             let d = sqrt(dx * dx + dy * dy)
             if d < threshold, best == nil || d < best!.dist {
                 best = (i, d)
             }
         }
-        if let best {
-            appState.openNote(nodes[best.index].id)
-        }
+        return best?.index
     }
 }
 
@@ -201,6 +353,7 @@ private struct GraphNode: Identifiable {
     let id: NoteID
     let title: String
     let degree: Int
+    let tags: Set<String>
     var position: CGPoint
     var velocity: CGVector
 }

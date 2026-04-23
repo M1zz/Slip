@@ -17,10 +17,13 @@ final class QuickCapturePanel: NSPanel {
     private let hostingController: NSHostingController<QuickCaptureView>
     private let viewModel = QuickCaptureViewModel()
 
-    init(onCommit: @escaping (String) -> Void) {
+    init(
+        tagsProvider: @escaping () -> [String] = { [] },
+        onCommit: @escaping (String) -> Void
+    ) {
         self.onCommit = onCommit
         self.hostingController = NSHostingController(
-            rootView: QuickCaptureView(viewModel: viewModel, onCommit: { _ in })
+            rootView: QuickCaptureView(viewModel: viewModel, tagsProvider: tagsProvider, onCommit: { _ in })
         )
 
         super.init(
@@ -42,6 +45,7 @@ final class QuickCapturePanel: NSPanel {
         // Rebuild the SwiftUI view with a real commit closure now that self exists.
         hostingController.rootView = QuickCaptureView(
             viewModel: viewModel,
+            tagsProvider: tagsProvider,
             onCommit: { [weak self] text in
                 self?.commit(text)
             }
@@ -96,8 +100,35 @@ final class QuickCaptureViewModel: ObservableObject {
 
 struct QuickCaptureView: View {
     @ObservedObject var viewModel: QuickCaptureViewModel
+    let tagsProvider: () -> [String]
     let onCommit: (String) -> Void
     @FocusState private var focused: Bool
+
+    /// Partial tag the user is currently typing at the end of the text, if any.
+    /// Matches `#<chars>` that aren't followed by whitespace or another `#`.
+    private var tagPartial: String? {
+        let last = viewModel.text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .last ?? ""
+        guard last.hasPrefix("#"), last.count >= 1 else { return nil }
+        let partial = String(last.dropFirst())
+        // Don't suggest once the user has moved on with a second `#` or other symbol.
+        guard !partial.contains("#") else { return nil }
+        return partial
+    }
+
+    private var suggestions: [String] {
+        guard let partial = tagPartial else { return [] }
+        let all = tagsProvider()
+        if partial.isEmpty {
+            return Array(all.prefix(6))
+        }
+        let lowered = partial.lowercased()
+        return all
+            .filter { $0.lowercased().hasPrefix(lowered) && $0.lowercased() != lowered }
+            .prefix(6)
+            .map { $0 }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -129,6 +160,25 @@ struct QuickCaptureView: View {
             }
             .frame(minHeight: 90)
 
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(suggestions, id: \.self) { tag in
+                            Button { accept(tag: tag) } label: {
+                                Text("#\(tag)")
+                                    .font(.system(size: 11))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
+
             HStack {
                 Spacer()
                 Button("Save") { onCommit(viewModel.text) }
@@ -139,5 +189,14 @@ struct QuickCaptureView: View {
         .padding(16)
         .background(.ultraThinMaterial)
         .onExitCommand { viewModel.reset() }
+    }
+
+    private func accept(tag: String) {
+        var text = viewModel.text
+        // Replace the trailing `#partial` with the selected tag followed by a space.
+        if let hashRange = text.range(of: "#", options: .backwards) {
+            text.replaceSubrange(hashRange.lowerBound..<text.endIndex, with: "#\(tag) ")
+            viewModel.text = text
+        }
     }
 }

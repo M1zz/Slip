@@ -3,6 +3,7 @@ import SlipCore
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
+    @State private var tagsExpanded: Bool = true
 
     private var displayed: [NoteID] {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
@@ -33,7 +34,7 @@ struct SidebarView: View {
                 }
 
                 if !appState.tags.isEmpty {
-                    Section("Tags") {
+                    Section(isExpanded: $tagsExpanded) {
                         TagRow(
                             label: "All Notes",
                             count: nil,
@@ -52,6 +53,8 @@ struct SidebarView: View {
                                 appState.selectedTag = tc.tag
                             }
                         }
+                    } header: {
+                        Text("Tags")
                     }
                 }
             }

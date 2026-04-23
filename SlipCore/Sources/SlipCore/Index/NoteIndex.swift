@@ -235,8 +235,9 @@ public final class NoteIndex {
             public let id: NoteID
             public let title: String
             public let degree: Int
-            public init(id: NoteID, title: String, degree: Int) {
-                self.id = id; self.title = title; self.degree = degree
+            public let tags: [String]
+            public init(id: NoteID, title: String, degree: Int, tags: [String]) {
+                self.id = id; self.title = title; self.degree = degree; self.tags = tags
             }
         }
         public struct Edge: Hashable, Sendable {
@@ -264,6 +265,9 @@ public final class NoteIndex {
                 JOIN notes n2 ON n2.id = l.target_id
                 WHERE l.kind = 'wikilink'
             """)
+            let tagRows = try Row.fetchAll(db, sql: """
+                SELECT note_id, tag FROM tags ORDER BY note_id, tag
+            """)
 
             let edges: [GraphSnapshot.Edge] = edgeRows.map {
                 GraphSnapshot.Edge(
@@ -278,12 +282,19 @@ public final class NoteIndex {
                 degree[e.to, default: 0] += 1
             }
 
+            var tagsByID: [NoteID: [String]] = [:]
+            for row in tagRows {
+                let id = NoteID(relativePath: row["note_id"])
+                tagsByID[id, default: []].append(row["tag"])
+            }
+
             let nodes: [GraphSnapshot.Node] = nodeRows.map { row in
                 let id = NoteID(relativePath: row["id"])
                 return GraphSnapshot.Node(
                     id: id,
                     title: row["title"],
-                    degree: degree[id] ?? 0
+                    degree: degree[id] ?? 0,
+                    tags: tagsByID[id] ?? []
                 )
             }
             return GraphSnapshot(nodes: nodes, edges: edges)

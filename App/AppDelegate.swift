@@ -44,9 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showQuickCapture() {
         if quickCapturePanel == nil {
-            quickCapturePanel = QuickCapturePanel(onCommit: { [weak self] text in
-                self?.appState?.appendToDailyNote(text)
-            })
+            quickCapturePanel = QuickCapturePanel(
+                tagsProvider: { [weak self] in
+                    self?.appState?.tags.map(\.tag) ?? []
+                },
+                onCommit: { [weak self] text in
+                    self?.appState?.appendToDailyNote(text)
+                }
+            )
         }
         quickCapturePanel?.present()
     }

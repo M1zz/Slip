@@ -178,9 +178,11 @@ struct MarkdownTextView: NSViewRepresentable {
                 MarkdownTextView.apply(reference: ref, on: storage, in: text)
             }
 
-            // Live Preview: dim syntax markers that aren't on the cursor line.
+            // Live Preview: hide syntax markers that aren't on the cursor line.
             // Markers on the cursor line stay full-color so the user can edit them;
-            // off-line markers fade to ~35% so the eye lands on the content.
+            // off-line markers collapse to zero-width + transparent so the eye
+            // lands on the rendered content only. The characters are still in the
+            // text storage — `.md` file, undo stack, and copy/paste are untouched.
             for marker in structure.syntaxMarkers {
                 let markerLine = structure.line(forUTF16Offset: marker.lowerBound)
                 guard markerLine != cursorLine else { continue }
@@ -190,7 +192,8 @@ struct MarkdownTextView: NSViewRepresentable {
                 guard hi > lo else { continue }
                 let range = NSRange(location: lo, length: hi - lo)
                 storage.addAttributes([
-                    .foregroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.35)
+                    .foregroundColor: NSColor.clear,
+                    .font: Theme.hidden
                 ], range: range)
             }
 
@@ -369,6 +372,10 @@ enum Theme {
     static let bold: NSFont = NSFontManager.shared.convert(body, toHaveTrait: .boldFontMask)
     static let italic: NSFont = NSFontManager.shared.convert(body, toHaveTrait: .italicFontMask)
     static let mono: NSFont = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+    /// Used to collapse marker glyphs (`#`, `**`, etc.) to zero width when the
+    /// cursor isn't on that line. TextKit still keeps the characters in the
+    /// layout, but they occupy effectively no space.
+    static let hidden: NSFont = NSFont.systemFont(ofSize: 0.01)
 
     static func heading(level: Int) -> NSFont {
         let sizes: [CGFloat] = [28, 24, 20, 18, 16, 15]

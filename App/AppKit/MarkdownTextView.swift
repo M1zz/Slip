@@ -85,7 +85,6 @@ struct MarkdownTextView: NSViewRepresentable {
         private let setText: (String) -> Void
         private let onWikilinkClick: (String) -> Void
         private var highlightWorkItem: DispatchWorkItem?
-        private var lastCursorLine: Int = -1
         let completer = WikilinkCompleter()
         var titlesProvider: () -> [String] = { [] }
 
@@ -102,14 +101,6 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
-            guard let tv = textView else { return }
-            let cursor = tv.selectedRange().location
-            let structure = MarkdownStructure(text: tv.string)
-            let line = structure.line(forUTF16Offset: cursor)
-            if line != lastCursorLine {
-                lastCursorLine = line
-                reapplyHighlighting(precomputed: structure)
-            }
             updateWikilinkCompletion()
         }
 
@@ -157,10 +148,6 @@ struct MarkdownTextView: NSViewRepresentable {
             let text = textView.string
             let structure = precomputed ?? MarkdownStructure(text: text)
 
-            let cursor = textView.selectedRange().location
-            let cursorLine = structure.line(forUTF16Offset: cursor)
-            lastCursorLine = cursorLine
-
             storage.beginEditing()
             let full = NSRange(location: 0, length: (text as NSString).length)
 
@@ -178,14 +165,13 @@ struct MarkdownTextView: NSViewRepresentable {
                 MarkdownTextView.apply(reference: ref, on: storage, in: text)
             }
 
-            // Live Preview: hide syntax markers that aren't on the cursor line.
-            // Markers on the cursor line stay full-color so the user can edit them;
-            // off-line markers collapse to zero-width + transparent so the eye
-            // lands on the rendered content only. The characters are still in the
-            // text storage — `.md` file, undo stack, and copy/paste are untouched.
+            // WYSIWYG: hide all syntax markers (#, **, _, `, > …) unconditionally.
+            // The characters are still in the text storage — the `.md` file, undo
+            // stack, and copy/paste see the raw markdown — but the glyphs collapse
+            // to zero width + transparent so the user only sees the rendered form.
+            // This matches Notion/Bear: the moment `# ` becomes a valid heading,
+            // the marker is gone and typing continues in heading style.
             for marker in structure.syntaxMarkers {
-                let markerLine = structure.line(forUTF16Offset: marker.lowerBound)
-                guard markerLine != cursorLine else { continue }
                 let length = (text as NSString).length
                 let lo = max(0, min(length, marker.lowerBound))
                 let hi = max(lo, min(length, marker.upperBound))

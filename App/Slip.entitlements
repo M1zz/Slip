@@ -2,14 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- App Sandbox is disabled so the app can write freely to user-chosen
+         notes folders under ~/Documents and friends. Under the sandbox,
+         macOS Tahoe denies writes through user-selected bookmarks with
+         NSCocoaErrorDomain 513 / EPERM even though reads succeed.
+         Re-enable and restore the read-write + app-scope-bookmark keys
+         below if/when we ship to the App Store. -->
     <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <!-- Needed to keep security-scoped bookmarks to the vault folder. -->
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
-    <key>com.apple.security.files.bookmarks.app-scope</key>
-    <true/>
-    <!-- Global hotkey via Carbon RegisterEventHotKey works under sandbox
-         as long as we don't try to observe other apps. No extra key needed. -->
+    <false/>
 </dict>
 </plist>

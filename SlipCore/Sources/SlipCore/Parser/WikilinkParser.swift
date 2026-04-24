@@ -15,9 +15,13 @@ public enum WikilinkParser {
 
     /// Matches `#tag` and `#nested/tag`. Requires the tag to start at line start
     /// or after whitespace so we don't match inside URLs or `#` headers.
+    /// Uses `\p{L}\p{N}` so Korean/Japanese/Chinese/etc. tags work.
     private static let tagRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
-        try! NSRegularExpression(pattern: #"(?:^|(?<=\s))#([A-Za-z][A-Za-z0-9_\-/]*)"#, options: [.anchorsMatchLines])
+        try! NSRegularExpression(
+            pattern: #"(?:^|(?<=\s))#([\p{L}\p{N}][\p{L}\p{N}_\-/]*)"#,
+            options: [.anchorsMatchLines]
+        )
     }()
 
     public static func references(in text: String) -> [NoteReference] {

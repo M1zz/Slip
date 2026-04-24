@@ -67,7 +67,8 @@ final class AppState: ObservableObject {
         watcher = nil
 
         let vault = try Vault(bookmark: bookmark)
-        _ = vault.beginAccess()
+        let accessGranted = vault.beginAccess()
+        NSLog("[Slip] vault opened at \(vault.root.path), security-scope access=\(accessGranted)")
         let vaultID = Self.stableVaultID(for: vault.root)
         let dbURL = try NoteIndex.defaultURL(for: vaultID)
         let index = try NoteIndex(databaseURL: dbURL)
@@ -198,19 +199,23 @@ final class AppState: ObservableObject {
     }
 
     func createNewNote() {
-        guard let vault else { return }
+        guard let vault else {
+            NSLog("[Slip] createNewNote skipped: no vault")
+            return
+        }
         // Flush pending edits on the current note before creating a new one.
         if currentNoteID != nil {
             saveCurrentNote()
         }
         do {
             let note = try writer.createNew(in: vault, title: "Untitled", body: "# Untitled\n\n")
+            NSLog("[Slip] created note at \(note.url.path)")
             currentNoteID = note.id
             currentNoteBody = note.body
             markInternalWrite(url: note.url)
             reindexIncrementally([note.url])
         } catch {
-            NSLog("Create failed: \(error)")
+            NSLog("[Slip] Create failed in \(vault.root.path): \(error)")
         }
     }
 

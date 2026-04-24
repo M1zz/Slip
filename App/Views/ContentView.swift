@@ -3,6 +3,7 @@ import SlipCore
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -18,6 +19,18 @@ struct ContentView: View {
                 } detail: {
                     InspectorView()
                         .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+                }
+            }
+        }
+        .toolbar {
+            if appState.vault != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        openWindow(id: "graph")
+                    } label: {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                    }
+                    .help("Show Graph (⇧⌘G)")
                 }
             }
         }

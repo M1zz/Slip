@@ -96,8 +96,35 @@ struct MarkdownTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
             setText(tv.string)
-            scheduleHighlighting()
+            // When the user has just pressed Enter, re-highlight immediately
+            // instead of after the 120ms debounce. NSTextView inherits the
+            // typing attributes from the character before the cursor, so if
+            // we wait, text typed on the new line carries over heading /
+            // blockquote / code-block styling from the line above until the
+            // debounce fires.
+            if Self.editEndedWithNewline(tv) {
+                reapplyHighlighting()
+                resetTypingAttributesToBody(tv)
+            } else {
+                scheduleHighlighting()
+            }
             updateWikilinkCompletion()
+        }
+
+        private static func editEndedWithNewline(_ tv: NSTextView) -> Bool {
+            let ns = tv.string as NSString
+            let loc = tv.selectedRange().location
+            guard loc > 0, loc <= ns.length else { return false }
+            return ns.character(at: loc - 1) == 0x0A
+        }
+
+        /// After a newline, force the typing attributes back to body so the
+        /// next keystroke doesn't reuse whatever the previous block inherited.
+        private func resetTypingAttributesToBody(_ tv: NSTextView) {
+            tv.typingAttributes = [
+                .font: Theme.body,
+                .foregroundColor: NSColor.labelColor
+            ]
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

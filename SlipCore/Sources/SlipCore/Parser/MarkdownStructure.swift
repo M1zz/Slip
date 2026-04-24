@@ -150,7 +150,21 @@ private struct SpanCollector: MarkupWalker {
     private func range(for markup: Markup) -> Range<Int>? {
         guard let sr = markup.range else { return nil }
         let start = utf16Offset(for: sr.lowerBound)
-        let end = utf16Offset(for: sr.upperBound)
+        var end = utf16Offset(for: sr.upperBound)
+        // Trim trailing newline / CR so block-level spans (heading, blockquote,
+        // code block, list item) don't style the line terminator. If the
+        // newline is styled as heading, NSTextView inherits that font as the
+        // typing attribute for the next line and new text starts in heading
+        // style until highlighting runs again.
+        let ns = source as NSString
+        while end > start, end <= ns.length {
+            let prev = ns.character(at: end - 1)
+            if prev == 0x0A || prev == 0x0D {
+                end -= 1
+            } else {
+                break
+            }
+        }
         guard end > start else { return nil }
         return start..<end
     }

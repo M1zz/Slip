@@ -24,7 +24,13 @@ struct SidebarView: View {
 
             List(selection: Binding(
                 get: { appState.currentNoteID },
-                set: { if let id = $0 { appState.openNote(id) } }
+                set: { newValue in
+                    // Defer the state mutation out of the view-update cycle;
+                    // SwiftUI complains if @Published values change synchronously
+                    // from inside a binding's setter during view computation.
+                    guard let id = newValue else { return }
+                    Task { @MainActor in appState.openNote(id) }
+                }
             )) {
                 Section(notesSectionTitle) {
                     ForEach(displayed, id: \.self) { id in

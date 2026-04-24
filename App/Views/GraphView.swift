@@ -17,7 +17,7 @@ import SlipCore
 struct GraphView: View {
     @EnvironmentObject var appState: AppState
     @State private var nodes: [GraphNode] = []
-    @State private var edges: [(Int, Int)] = []
+    @State private var edges: [GraphEdge] = []
     @State private var ticksRemaining: Int = 400
     @State private var loaded = false
 
@@ -178,9 +178,9 @@ struct GraphView: View {
                 velocity: .zero
             ))
         }
-        let builtEdges: [(Int, Int)] = snapshot.edges.compactMap {
-            guard let a = indexByID[$0.from], let b = indexByID[$0.to] else { return nil }
-            return (a, b)
+        let builtEdges: [GraphEdge] = snapshot.edges.compactMap { edge in
+            guard let a = indexByID[edge.from], let b = indexByID[edge.to] else { return nil }
+            return GraphEdge(a: a, b: b, kind: edge.kind)
         }
         self.nodes = built
         self.edges = builtEdges
@@ -210,17 +210,21 @@ struct GraphView: View {
             }
         }
 
-        // Spring attraction along edges.
-        let kSpring: CGFloat = 0.05
+        // Spring attraction along edges. Unlinked mentions pull weaker than
+        // explicit wikilinks so implicit connections cluster more loosely.
+        let kSpringWiki: CGFloat = 0.05
+        let kSpringMention: CGFloat = 0.015
         let restLength: CGFloat = 90
-        for (a, b) in edges {
+        for edge in edges {
+            let a = edge.a, b = edge.b
             let dx = nodes[b].position.x - nodes[a].position.x
             let dy = nodes[b].position.y - nodes[a].position.y
             let dist = sqrt(dx * dx + dy * dy)
             guard dist > 0.01 else { continue }
             let diff = dist - restLength
-            let fx = (dx / dist) * kSpring * diff
-            let fy = (dy / dist) * kSpring * diff
+            let k = edge.kind == "wikilink" ? kSpringWiki : kSpringMention
+            let fx = (dx / dist) * k * diff
+            let fy = (dy / dist) * k * diff
             forces[a].dx += fx; forces[a].dy += fy
             forces[b].dx -= fx; forces[b].dy -= fy
         }
@@ -279,13 +283,27 @@ struct GraphView: View {
         let currentID = appState.currentNoteID
         let filterTag = appState.selectedTag
 
-        // Edges under nodes.
-        var edgePath = Path()
-        for (a, b) in edges {
-            edgePath.move(to: viewPoint(for: nodes[a].position, in: size))
-            edgePath.addLine(to: viewPoint(for: nodes[b].position, in: size))
+        // Edges under nodes — explicit wikilinks as solid lines, bare-title
+        // mentions as thinner dashed lines so the eye weights real links
+        // first.
+        var wikiPath = Path()
+        var mentionPath = Path()
+        for edge in edges {
+            let from = viewPoint(for: nodes[edge.a].position, in: size)
+            let to = viewPoint(for: nodes[edge.b].position, in: size)
+            if edge.kind == "wikilink" {
+                wikiPath.move(to: from); wikiPath.addLine(to: to)
+            } else {
+                mentionPath.move(to: from); mentionPath.addLine(to: to)
+            }
         }
-        ctx.stroke(edgePath, with: .color(.secondary.opacity(filterTag == nil ? 0.35 : 0.15)), lineWidth: 1)
+        let edgeOpacity: Double = filterTag == nil ? 0.45 : 0.18
+        ctx.stroke(wikiPath, with: .color(.secondary.opacity(edgeOpacity)), lineWidth: 1.2)
+        ctx.stroke(
+            mentionPath,
+            with: .color(.secondary.opacity(edgeOpacity * 0.7)),
+            style: StrokeStyle(lineWidth: 0.8, dash: [3, 3])
+        )
 
         for node in nodes {
             let p = viewPoint(for: node.position, in: size)
@@ -417,4 +435,11 @@ private struct GraphNode: Identifiable {
     let tags: Set<String>
     var position: CGPoint
     var velocity: CGVector
+}
+
+private struct GraphEdge {
+    let a: Int
+    let b: Int
+    /// "wikilink" (explicit `[[...]]`) or "unlinked" (bare title mention).
+    let kind: String
 }

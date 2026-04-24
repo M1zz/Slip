@@ -44,12 +44,10 @@ final class WikilinkCompleter {
         }
         self.anchorView = anchorView
 
-        // If nothing matches, hide the popover rather than show an empty list.
-        if viewModel.filteredTitles.isEmpty {
-            hide()
-            return
-        }
-
+        // Show even when the filtered list is empty — the view renders a
+        // "No matches" row and the popover stays visible so the user sees
+        // feedback after pressing ⌘K (previously it closed silently when
+        // there were no other notes to link to yet).
         if !popover.isShown {
             let rect = Self.cursorRect(in: anchorView, for: anchorRange)
             popover.show(relativeTo: rect, of: anchorView, preferredEdge: .maxY)

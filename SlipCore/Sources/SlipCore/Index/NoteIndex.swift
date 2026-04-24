@@ -243,8 +243,12 @@ public final class NoteIndex {
         public struct Edge: Hashable, Sendable {
             public let from: NoteID
             public let to: NoteID
-            public init(from: NoteID, to: NoteID) {
-                self.from = from; self.to = to
+            /// "wikilink" for explicit `[[target]]`, "unlinked" for bare
+            /// title mentions detected on full reindex. Renderers can use
+            /// this to style the two differently.
+            public let kind: String
+            public init(from: NoteID, to: NoteID, kind: String) {
+                self.from = from; self.to = to; self.kind = kind
             }
         }
         public let nodes: [Node]
@@ -259,11 +263,11 @@ public final class NoteIndex {
                 SELECT id, title FROM notes
             """)
             let edgeRows = try Row.fetchAll(db, sql: """
-                SELECT l.source_id, l.target_id
+                SELECT l.source_id, l.target_id, l.kind
                 FROM links l
                 JOIN notes n1 ON n1.id = l.source_id
                 JOIN notes n2 ON n2.id = l.target_id
-                WHERE l.kind = 'wikilink'
+                WHERE l.kind IN ('wikilink', 'unlinked')
             """)
             let tagRows = try Row.fetchAll(db, sql: """
                 SELECT note_id, tag FROM tags ORDER BY note_id, tag
@@ -272,7 +276,8 @@ public final class NoteIndex {
             let edges: [GraphSnapshot.Edge] = edgeRows.map {
                 GraphSnapshot.Edge(
                     from: NoteID(relativePath: $0["source_id"]),
-                    to: NoteID(relativePath: $0["target_id"])
+                    to: NoteID(relativePath: $0["target_id"]),
+                    kind: $0["kind"]
                 )
             }
 

@@ -169,6 +169,18 @@ public final class VaultIndexer {
                     }
                 }
 
+                // Unlinked-mention scan on the saved note too, so the graph
+                // picks up bare title mentions immediately instead of only
+                // on the next full reindex.
+                let lowerBody = body.lowercased()
+                for (titleKey, otherID) in titleIndex where otherID != id {
+                    guard !titleKey.isEmpty else { continue }
+                    if lowerBody.contains(titleKey),
+                       !outgoing.contains(where: { $0.targetID == otherID }) {
+                        outgoing.append(.init(targetID: otherID, kind: "unlinked"))
+                    }
+                }
+
                 let hash = Self.sha256(body)
                 let indexed = NoteIndex.IndexedNote(
                     id: id,

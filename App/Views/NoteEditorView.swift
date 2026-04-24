@@ -66,7 +66,7 @@ struct NoteEditorView: View {
     private func debouncedSave() {
         autosave?.cancel()
         autosave = Just(())
-            .delay(for: .seconds(0.8), scheduler: RunLoop.main)
+            .delay(for: .seconds(0.3), scheduler: RunLoop.main)
             .sink { _ in appState.saveCurrentNote() }
     }
 }

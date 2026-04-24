@@ -177,19 +177,32 @@ final class AppState: ObservableObject {
     }
 
     func saveCurrentNote() {
-        guard let vault, let id = currentNoteID else { return }
+        guard let vault else {
+            NSLog("[Slip] saveCurrentNote skipped: no vault")
+            return
+        }
+        guard let id = currentNoteID else {
+            NSLog("[Slip] saveCurrentNote skipped: no currentNoteID")
+            return
+        }
         let url = vault.url(for: id)
+        let body = currentNoteBody
         do {
-            try writer.write(currentNoteBody, to: url)
+            try writer.write(body, to: url)
+            NSLog("[Slip] saved \(body.count) chars to \(url.path)")
             markInternalWrite(url: url)
             reindexIncrementally([url])
         } catch {
-            NSLog("Save failed: \(error)")
+            NSLog("[Slip] Save failed for \(url.path): \(error)")
         }
     }
 
     func createNewNote() {
         guard let vault else { return }
+        // Flush pending edits on the current note before creating a new one.
+        if currentNoteID != nil {
+            saveCurrentNote()
+        }
         do {
             let note = try writer.createNew(in: vault, title: "Untitled", body: "# Untitled\n\n")
             currentNoteID = note.id

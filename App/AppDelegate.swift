@@ -24,6 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey?.register()
     }
 
+    func applicationWillResignActive(_ notification: Notification) {
+        // User switched to another app — flush in case they come back minutes later
+        // or the system throttles us. Save is idempotent for unchanged content.
+        appState?.saveCurrentNote()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Flush any pending edits; the editor uses a 0.8s debounce for autosave
         // so a quick quit after typing would otherwise drop the last edits.

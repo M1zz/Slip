@@ -162,6 +162,12 @@ final class AppState: ObservableObject {
 
     func openNote(_ id: NoteID) {
         guard let vault, let index else { return }
+        // Flush any pending edits on the outgoing note before we swap state.
+        // Without this, clicking a new note within the editor's debounce
+        // window (0.8s) would silently drop the in-progress changes.
+        if currentNoteID != nil, currentNoteID != id {
+            saveCurrentNote()
+        }
         let url = vault.url(for: id)
         let body = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         self.currentNoteID = id

@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Flush any pending edits; the editor uses a 0.8s debounce for autosave
+        // so a quick quit after typing would otherwise drop the last edits.
+        appState?.saveCurrentNote()
         hotkey?.unregister()
     }
 

@@ -20,26 +20,26 @@ struct ContentView: View {
                             InspectorView()
                         }
                         .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
-                }
-            }
-        }
-        .toolbar {
-            if appState.vault != nil {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        openWindow(id: "graph")
-                    } label: {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                    }
-                    .help("Show Graph (⇧⌘G)")
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        inspectorVisible.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help("Toggle Inspector")
+                        // Attach these to the detail column's toolbar so
+                        // `.primaryAction` lands on the top-right of the
+                        // window, not inside the sidebar's toolbar area.
+                        .toolbar {
+                            ToolbarItemGroup(placement: .primaryAction) {
+                                Button {
+                                    openWindow(id: "graph")
+                                } label: {
+                                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                                }
+                                .help("Show Graph (⇧⌘G)")
+
+                                Button {
+                                    inspectorVisible.toggle()
+                                } label: {
+                                    Image(systemName: "sidebar.right")
+                                }
+                                .help("Toggle Inspector")
+                            }
+                        }
                 }
             }
         }

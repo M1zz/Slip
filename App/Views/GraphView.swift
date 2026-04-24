@@ -29,6 +29,11 @@ struct GraphView: View {
     // Drag state. Decided once at the start of a drag based on where it began.
     @State private var dragMode: DragMode = .idle
 
+    /// Tag the user clicked in the legend. Isolates that group visually
+    /// (matching nodes/edges stay vivid; everything else dims). Null means
+    /// no group is focused.
+    @State private var focusedTag: String? = nil
+
     private let timer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -94,19 +99,36 @@ struct GraphView: View {
 
     private var legend: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Groups")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .textCase(.uppercase)
-            ForEach(Array(tagsInGraph.prefix(10)), id: \.self) { tag in
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Self.colorForTag(tag))
-                        .frame(width: 9, height: 9)
-                    Text("#\(tag)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text("Groups")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                Spacer(minLength: 8)
+                if focusedTag != nil {
+                    Button { focusedTag = nil } label: {
+                        Text("Clear")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 }
+            }
+            ForEach(Array(tagsInGraph.prefix(10)), id: \.self) { tag in
+                Button {
+                    focusedTag = (focusedTag == tag) ? nil : tag
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Self.colorForTag(tag))
+                            .frame(width: 9, height: 9)
+                        Text("#\(tag)")
+                            .font(.system(size: 11, weight: focusedTag == tag ? .semibold : .regular))
+                            .foregroundStyle(focusedTag == tag ? .primary : .secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
             if tagsInGraph.count > 10 {
                 Text("+\(tagsInGraph.count - 10) more")
@@ -137,10 +159,10 @@ struct GraphView: View {
             Button { zoom = clampZoom(zoom / 1.2); zoomAtGestureStart = zoom } label: {
                 Image(systemName: "minus.magnifyingglass")
             }
-            Button { resetViewport() } label: {
+            Button { resetViewport(); restartSimulation() } label: {
                 Image(systemName: "scope")
             }
-            .help("Reset view")
+            .help("Reset view and re-cluster groups")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -229,6 +251,26 @@ struct GraphView: View {
             forces[b].dx -= fx; forces[b].dy -= fy
         }
 
+        // Same-tag attraction: nodes sharing a tag pull toward each other so
+        // groups coalesce in space. Scales linearly with distance so it
+        // doesn't explode at close range; clamped distance floor avoids
+        // singularities.
+        let kTagAttract: CGFloat = 0.003
+        for i in 0..<count {
+            let tagsI = nodes[i].tags
+            guard !tagsI.isEmpty else { continue }
+            for j in (i + 1)..<count {
+                guard !tagsI.isDisjoint(with: nodes[j].tags) else { continue }
+                let dx = nodes[j].position.x - nodes[i].position.x
+                let dy = nodes[j].position.y - nodes[i].position.y
+                let dist = max(8, sqrt(dx * dx + dy * dy))
+                let fx = (dx / dist) * kTagAttract * dist
+                let fy = (dy / dist) * kTagAttract * dist
+                forces[i].dx += fx; forces[i].dy += fy
+                forces[j].dx -= fx; forces[j].dy -= fy
+            }
+        }
+
         // Gentle center pull keeps everything on-screen.
         let kCenter: CGFloat = 0.02
         for i in 0..<count {
@@ -277,11 +319,39 @@ struct GraphView: View {
         zoomAtGestureStart = 1.0
     }
 
+    /// Shuffles nodes onto a new initial circle and refills the tick budget
+    /// so the tag-cluster forces can pull groups into fresh positions. Used
+    /// by the "reset" control after tags change or the layout has drifted.
+    private func restartSimulation() {
+        let count = nodes.count
+        guard count > 0 else { return }
+        let radius: CGFloat = 180
+        for i in 0..<count {
+            let angle = 2 * .pi * Double(i) / Double(count)
+            let jitter = CGFloat.random(in: -40...40)
+            nodes[i].position = CGPoint(
+                x: CGFloat(cos(angle)) * (radius + jitter),
+                y: CGFloat(sin(angle)) * (radius + jitter)
+            )
+            nodes[i].velocity = .zero
+        }
+        ticksRemaining = 400
+    }
+
     // MARK: - Render
 
     private func draw(ctx: GraphicsContext, size: CGSize) {
         let currentID = appState.currentNoteID
-        let filterTag = appState.selectedTag
+        // Both the sidebar tag filter (appState.selectedTag) and the in-graph
+        // legend click (focusedTag) can isolate a group. Focused-in-graph
+        // takes priority so the user can drill in without touching sidebar.
+        let filterTag = focusedTag ?? appState.selectedTag
+
+        // Tag-group bubbles: soft colored circles enclosing each tag's nodes.
+        // Drawn first so they sit behind edges and nodes. Groups with only
+        // one tagged node are skipped — a single-node bubble looks like a
+        // halo, not a group.
+        drawGroupBubbles(ctx: ctx, size: size, focus: filterTag)
 
         // Edges under nodes — explicit wikilinks as solid lines, bare-title
         // mentions as thinner dashed lines so the eye weights real links
@@ -347,6 +417,41 @@ struct GraphView: View {
                 label = label.foregroundColor(.secondary)
             }
             ctx.draw(label, at: CGPoint(x: p.x, y: p.y + radius + 10), anchor: .top)
+        }
+    }
+
+    private func drawGroupBubbles(ctx: GraphicsContext, size: CGSize, focus: String?) {
+        // Build primary-tag → node-indices map.
+        var byTag: [String: [Int]] = [:]
+        for (i, node) in nodes.enumerated() {
+            guard let primary = node.tags.sorted().first else { continue }
+            byTag[primary, default: []].append(i)
+        }
+        for (tag, indices) in byTag where indices.count >= 2 {
+            var cx: CGFloat = 0, cy: CGFloat = 0
+            for i in indices {
+                cx += nodes[i].position.x
+                cy += nodes[i].position.y
+            }
+            cx /= CGFloat(indices.count)
+            cy /= CGFloat(indices.count)
+            var maxDist: CGFloat = 35
+            for i in indices {
+                let dx = nodes[i].position.x - cx
+                let dy = nodes[i].position.y - cy
+                let d = sqrt(dx * dx + dy * dy) + 26
+                if d > maxDist { maxDist = d }
+            }
+            let center = viewPoint(for: CGPoint(x: cx, y: cy), in: size)
+            let radius = maxDist * zoom
+            let rect = CGRect(x: center.x - radius, y: center.y - radius,
+                              width: radius * 2, height: radius * 2)
+            let fillAlpha: Double = focus == tag ? 0.28 : (focus == nil ? 0.10 : 0.03)
+            let strokeAlpha: Double = focus == tag ? 0.55 : (focus == nil ? 0.2 : 0.08)
+            ctx.fill(Path(ellipseIn: rect), with: .color(Self.colorForTag(tag).opacity(fillAlpha)))
+            ctx.stroke(Path(ellipseIn: rect),
+                       with: .color(Self.colorForTag(tag).opacity(strokeAlpha)),
+                       lineWidth: 1)
         }
     }
 

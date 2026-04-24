@@ -220,11 +220,36 @@ public final class VaultIndexer {
         for line in body.split(whereSeparator: \.isNewline) {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("# ") {
-                return String(t.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                let title = String(t.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty { return Self.truncate(title) }
             }
         }
-        // 3. filename.
+        // 3. first non-empty line. Users may type without an explicit H1 —
+        //    with marker hiding, the `#` is invisible anyway, so requiring it
+        //    would leave every note titled "Untitled". Strip leading block
+        //    markers so they don't show up in the sidebar title.
+        for line in body.split(whereSeparator: \.isNewline) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { continue }
+            let cleaned = Self.stripLeadingMarkdownSyntax(t)
+            if !cleaned.isEmpty { return Self.truncate(cleaned) }
+        }
+        // 4. filename.
         return fallbackFilename
+    }
+
+    private static func stripLeadingMarkdownSyntax(_ line: String) -> String {
+        var s = line
+        // Heading hashes of any level.
+        while s.hasPrefix("#") { s = String(s.dropFirst()) }
+        // Blockquote / list markers.
+        while let first = s.first, "><-*".contains(first) { s = String(s.dropFirst()) }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func truncate(_ s: String, limit: Int = 80) -> String {
+        if s.count <= limit { return s }
+        return String(s.prefix(limit)) + "…"
     }
 
     private static func sha256(_ s: String) -> String {

@@ -208,7 +208,11 @@ final class AppState: ObservableObject {
             saveCurrentNote()
         }
         do {
-            let note = try writer.createNew(in: vault, title: "Untitled", body: "# Untitled\n\n")
+            // Empty body — the title will come from whatever the user types on
+            // the first line (see VaultIndexer.extractTitle's first-non-empty
+            // fallback). No placeholder avoids the stale "Untitled" H1 sticking
+            // around when the user types below it instead of replacing it.
+            let note = try writer.createNew(in: vault, title: "Untitled", body: "")
             NSLog("[Slip] created note at \(note.url.path)")
             currentNoteID = note.id
             currentNoteBody = note.body

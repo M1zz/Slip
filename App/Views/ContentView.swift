@@ -4,6 +4,7 @@ import SlipCore
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.openWindow) private var openWindow
+    @State private var inspectorVisible: Bool = true
 
     var body: some View {
         Group {
@@ -13,12 +14,12 @@ struct ContentView: View {
                 NavigationSplitView {
                     SidebarView()
                         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
-                } content: {
-                    NoteEditorView()
-                        .navigationSplitViewColumnWidth(min: 400, ideal: 640)
                 } detail: {
-                    InspectorView()
-                        .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+                    NoteEditorView()
+                        .inspector(isPresented: $inspectorVisible) {
+                            InspectorView()
+                        }
+                        .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
                 }
             }
         }
@@ -31,6 +32,14 @@ struct ContentView: View {
                         Image(systemName: "point.3.connected.trianglepath.dotted")
                     }
                     .help("Show Graph (⇧⌘G)")
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        inspectorVisible.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                    }
+                    .help("Toggle Inspector")
                 }
             }
         }

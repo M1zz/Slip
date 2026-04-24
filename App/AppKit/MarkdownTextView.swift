@@ -28,6 +28,10 @@ struct MarkdownTextView: NSViewRepresentable {
     /// Read lazily via `titles()` inside the coordinator to pick up updates
     /// without recreating the text view.
     var titles: () -> [String] = { [] }
+    /// Monotonically increasing counter that asks the editor to insert `[[`
+    /// at the current cursor position, which kicks off the wikilink
+    /// autocomplete popover. Driven by the toolbar "link" button / ⌘K.
+    var insertLinkRequest: Int = 0
     var onWikilinkClick: (String) -> Void = { _ in }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -67,6 +71,10 @@ struct MarkdownTextView: NSViewRepresentable {
             textView.string = text
             context.coordinator.reapplyHighlighting()
         }
+        if context.coordinator.lastInsertLinkRequest != insertLinkRequest {
+            context.coordinator.lastInsertLinkRequest = insertLinkRequest
+            context.coordinator.insertAtCursor("[[")
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -85,6 +93,7 @@ struct MarkdownTextView: NSViewRepresentable {
         private let setText: (String) -> Void
         private let onWikilinkClick: (String) -> Void
         private var highlightWorkItem: DispatchWorkItem?
+        var lastInsertLinkRequest: Int = 0
         let completer = WikilinkCompleter()
         var titlesProvider: () -> [String] = { [] }
 
@@ -125,6 +134,23 @@ struct MarkdownTextView: NSViewRepresentable {
                 .font: Theme.body,
                 .foregroundColor: NSColor.labelColor
             ]
+        }
+
+        /// Insert a string at the cursor (replacing the selection) and move
+        /// the caret to the end of the inserted text. Used by the toolbar
+        /// "insert link" button to drop `[[` at the cursor and let the
+        /// wikilink popover take over.
+        func insertAtCursor(_ s: String) {
+            guard let tv = textView else { return }
+            tv.window?.makeFirstResponder(tv)
+            let range = tv.selectedRange()
+            if tv.shouldChangeText(in: range, replacementString: s) {
+                tv.textStorage?.replaceCharacters(in: range, with: s)
+                tv.didChangeText()
+                let newCaret = range.location + (s as NSString).length
+                tv.setSelectedRange(NSRange(location: newCaret, length: 0))
+            }
+            updateWikilinkCompletion()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

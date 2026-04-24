@@ -48,6 +48,13 @@ struct GraphView: View {
                         .padding()
                 }
                 VStack {
+                    HStack(alignment: .top) {
+                        if !tagsInGraph.isEmpty {
+                            legend
+                        }
+                        Spacer()
+                    }
+                    .padding(10)
                     Spacer()
                     HStack {
                         Spacer()
@@ -75,6 +82,51 @@ struct GraphView: View {
             tick()
             ticksRemaining -= 1
         }
+    }
+
+    /// Tags that actually appear on at least one node in the current graph,
+    /// sorted alphabetically for stable legend ordering.
+    private var tagsInGraph: [String] {
+        var set = Set<String>()
+        for node in nodes { set.formUnion(node.tags) }
+        return set.sorted()
+    }
+
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Groups")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .textCase(.uppercase)
+            ForEach(Array(tagsInGraph.prefix(10)), id: \.self) { tag in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Self.colorForTag(tag))
+                        .frame(width: 9, height: 9)
+                    Text("#\(tag)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if tagsInGraph.count > 10 {
+                Text("+\(tagsInGraph.count - 10) more")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Deterministic tag → color. djb2 hash mapped onto a hue wheel with
+    /// mid saturation/brightness so colors stay distinct but not garish.
+    static func colorForTag(_ tag: String) -> Color {
+        var hash: UInt32 = 5381
+        for byte in tag.utf8 {
+            hash = (hash &<< 5) &+ hash &+ UInt32(byte)
+        }
+        let hue = Double(hash % 360) / 360.0
+        return Color(hue: hue, saturation: 0.6, brightness: 0.85)
     }
 
     private var controls: some View {
@@ -243,19 +295,28 @@ struct GraphView: View {
             let matchesFilter = filterTag.map(node.tags.contains) ?? true
             let isCurrent = node.id == currentID
 
+            // Tag-based grouping color: nodes sharing a tag get the same hue.
+            // Untagged nodes stay muted so the eye still clusters around the
+            // colored groups rather than getting noise from every note.
             let fill: Color
             if isCurrent {
                 fill = .accentColor
-            } else if filterTag != nil && matchesFilter {
-                fill = .accentColor.opacity(0.85)
             } else if !matchesFilter {
                 fill = .secondary.opacity(0.25)
+            } else if let primaryTag = node.tags.sorted().first {
+                fill = Self.colorForTag(primaryTag)
             } else if node.degree == 0 {
-                fill = .secondary
+                fill = .secondary.opacity(0.7)
             } else {
-                fill = .primary.opacity(0.8)
+                fill = .secondary
             }
             ctx.fill(Path(ellipseIn: rect), with: .color(fill))
+            // Outline on the current node so it reads clearly against a
+            // tag-colored background in the same cluster.
+            if isCurrent {
+                ctx.stroke(Path(ellipseIn: rect.insetBy(dx: -2, dy: -2)),
+                           with: .color(.accentColor), lineWidth: 1.5)
+            }
 
             // Only label if the node isn't dimmed away.
             guard matchesFilter || isCurrent else { continue }

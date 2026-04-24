@@ -11,7 +11,18 @@ final class AppState: ObservableObject {
     @Published var vault: Vault?
     @Published var noteList: [NoteID] = []
     @Published var currentNoteID: NoteID?
+    /// Title of the currently open note, shown as a dedicated field in the
+    /// editor. Split out of the body on open and combined back in on save
+    /// as the note's first H1 — so the on-disk `.md` stays a plain markdown
+    /// file that Obsidian, iA Writer etc. can read untouched.
+    @Published var currentNoteTitle: String = ""
+    /// Body WITHOUT the title H1 line. Round-trips as `# <title>\n\n<body>`
+    /// when combined for save.
     @Published var currentNoteBody: String = ""
+    /// Incremented by the toolbar/⌘K handler to ask the active editor to
+    /// insert `[[` at the cursor (which triggers the existing wikilink
+    /// autocomplete). MarkdownTextView observes this counter.
+    @Published var insertLinkRequest: Int = 0
     @Published var searchQuery: String = "" {
         didSet { runSearch() }
     }
@@ -170,11 +181,49 @@ final class AppState: ObservableObject {
             saveCurrentNote()
         }
         let url = vault.url(for: id)
-        let body = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let fullContent = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let (title, body) = Self.splitTitleAndBody(fullContent)
         self.currentNoteID = id
+        self.currentNoteTitle = title
         self.currentNoteBody = body
         self.backlinks = (try? index.backlinks(to: id)) ?? []
         try? index.recordView(id: id)
+    }
+
+    func requestInsertLink() {
+        insertLinkRequest &+= 1
+    }
+
+    /// Split a note's full `.md` content into an explicit title (from the
+    /// first H1 line, if any) and the remaining body. Leading blank lines
+    /// are preserved only if there was no H1 to consume.
+    static func splitTitleAndBody(_ fullContent: String) -> (title: String, body: String) {
+        let lines = fullContent.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+            i += 1
+        }
+        guard i < lines.count else { return ("", fullContent) }
+        let first = lines[i].trimmingCharacters(in: .whitespaces)
+        guard first.hasPrefix("# ") else { return ("", fullContent) }
+        let title = String(first.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+
+        // Drop the H1 line and one trailing blank line if present.
+        var after = i + 1
+        if after < lines.count, lines[after].trimmingCharacters(in: .whitespaces).isEmpty {
+            after += 1
+        }
+        let body = after >= lines.count ? "" : lines[after...].joined(separator: "\n")
+        return (title, body)
+    }
+
+    /// Rejoin the edited title and body into a full markdown document. Empty
+    /// titles result in a bodyless-first file (no H1 at all).
+    static func combineTitleAndBody(title: String, body: String) -> String {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return body }
+        if body.isEmpty { return "# \(t)\n" }
+        return "# \(t)\n\n\(body)"
     }
 
     func saveCurrentNote() {
@@ -187,10 +236,10 @@ final class AppState: ObservableObject {
             return
         }
         let url = vault.url(for: id)
-        let body = currentNoteBody
+        let fullContent = Self.combineTitleAndBody(title: currentNoteTitle, body: currentNoteBody)
         do {
-            try writer.write(body, to: url)
-            NSLog("[Slip] saved \(body.count) chars to \(url.path)")
+            try writer.write(fullContent, to: url)
+            NSLog("[Slip] saved \(fullContent.count) chars to \(url.path)")
             markInternalWrite(url: url)
             reindexIncrementally([url])
         } catch {
@@ -215,7 +264,8 @@ final class AppState: ObservableObject {
             let note = try writer.createNew(in: vault, title: "Untitled", body: "")
             NSLog("[Slip] created note at \(note.url.path)")
             currentNoteID = note.id
-            currentNoteBody = note.body
+            currentNoteTitle = ""
+            currentNoteBody = ""
             markInternalWrite(url: note.url)
             reindexIncrementally([note.url])
         } catch {

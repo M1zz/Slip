@@ -26,6 +26,15 @@ struct ContentView: View {
                         .toolbar {
                             ToolbarItemGroup(placement: .primaryAction) {
                                 Button {
+                                    appState.requestInsertLink()
+                                } label: {
+                                    Image(systemName: "link")
+                                }
+                                .keyboardShortcut("k")
+                                .disabled(appState.currentNoteID == nil)
+                                .help("Insert Link to Another Note (⌘K)")
+
+                                Button {
                                     openWindow(id: "graph")
                                 } label: {
                                     Image(systemName: "point.3.connected.trianglepath.dotted")

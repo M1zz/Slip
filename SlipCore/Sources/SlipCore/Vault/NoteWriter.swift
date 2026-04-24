@@ -1,29 +1,24 @@
 import Foundation
 
-/// Writes note content to disk using `NSFileCoordinator` so external editors
-/// (Obsidian, iA Writer, vim) and iCloud Drive sync see consistent state.
+/// Writes note content to disk.
 ///
-/// Writes are atomic: we use `.atomic` so partial writes are impossible if the
-/// app crashes mid-save.
+/// Uses `String.write(to:atomically:encoding:)` with atomically=true, which
+/// stages to a sibling temp file and renames — so partial writes are
+/// impossible if the app crashes mid-save.
+///
+/// Note: we previously wrapped this in `NSFileCoordinator` to coordinate with
+/// file presenters (Obsidian, iA Writer). In practice the coordinator's
+/// interaction with user-selected security-scoped bookmarks has been flaky
+/// on recent macOS releases — it could translate the URL to one the sandbox
+/// then refused to write to, producing NSCocoaErrorDomain 513 (EPERM). Direct
+/// atomic write preserves crash-safety without that failure mode, and our
+/// VaultWatcher already refreshes on external edits.
 public final class NoteWriter {
 
     public init() {}
 
     public func write(_ body: String, to url: URL) throws {
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordinationError: NSError?
-        var innerError: Error?
-
-        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
-            do {
-                try body.write(to: coordinatedURL, atomically: true, encoding: .utf8)
-            } catch {
-                innerError = error
-            }
-        }
-
-        if let e = coordinationError { throw e }
-        if let e = innerError { throw e }
+        try body.write(to: url, atomically: true, encoding: .utf8)
     }
 
     public func createNew(in vault: Vault, title: String, body: String = "") throws -> Note {

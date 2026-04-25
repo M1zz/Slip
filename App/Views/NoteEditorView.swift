@@ -13,25 +13,31 @@ struct NoteEditorView: View {
                 emptyState
             } else {
                 VStack(spacing: 0) {
-                    TextField("Title", text: Binding(
-                        get: { appState.currentNoteTitle },
-                        set: { appState.currentNoteTitle = $0 }
-                    ))
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 24, weight: .semibold))
-                    .focused($titleFocused)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, 6)
-                    .onChange(of: appState.currentNoteTitle) { _, _ in
-                        debouncedSave()
-                    }
+                    // `$appState.currentNoteTitle` (EnvironmentObject's
+                    // projected binding) avoids the "Publishing changes
+                    // from within view updates" warning that a manually-
+                    // wrapped Binding(get:set:) hits when SwiftUI processes
+                    // text-input deltas during the same render pass.
+                    TextField("Title", text: $appState.currentNoteTitle)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 24, weight: .semibold))
+                        .focused($titleFocused)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 18)
+                        .padding(.bottom, 6)
+                        .onChange(of: appState.currentNoteTitle) { _, _ in
+                            debouncedSave()
+                        }
 
                     TagBar(
                         currentTags: currentTags,
                         allTags: allTagSuggestions,
-                        onAdd: addTag,
-                        onRemove: removeTag
+                        onAdd: { tag in
+                            Task { @MainActor in addTag(tag) }
+                        },
+                        onRemove: { tag in
+                            Task { @MainActor in removeTag(tag) }
+                        }
                     )
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
@@ -39,12 +45,7 @@ struct NoteEditorView: View {
                     Divider()
 
                     MarkdownTextView(
-                        text: Binding(
-                            get: { appState.currentNoteBody },
-                            set: { newValue in
-                                appState.currentNoteBody = newValue
-                            }
-                        ),
+                        text: $appState.currentNoteBody,
                         titles: { Array(appState.titleByID.values) },
                         insertLinkRequest: appState.insertLinkRequest,
                         onWikilinkClick: { target in

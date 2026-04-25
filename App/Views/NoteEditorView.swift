@@ -30,7 +30,7 @@ struct NoteEditorView: View {
                         }
 
                     TagBar(
-                        currentTags: currentTags,
+                        currentTags: appState.currentNoteTags,
                         allTags: allTagSuggestions,
                         onAdd: { tag in
                             Task { @MainActor in addTag(tag) }
@@ -41,6 +41,9 @@ struct NoteEditorView: View {
                     )
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
+                    .onChange(of: appState.currentNoteTags) { _, _ in
+                        debouncedSave()
+                    }
 
                     Divider()
 
@@ -81,20 +84,6 @@ struct NoteEditorView: View {
 
     // MARK: - Tags
 
-    /// Unique tags found inline in the current note body, in first-occurrence order.
-    private var currentTags: [String] {
-        let refs = WikilinkParser.references(in: appState.currentNoteBody)
-        var seen = Set<String>()
-        var ordered: [String] = []
-        for ref in refs {
-            if case .tag(let t) = ref.kind, !seen.contains(t) {
-                seen.insert(t)
-                ordered.append(t)
-            }
-        }
-        return ordered
-    }
-
     /// Tags that exist anywhere in the vault, for the add-tag autocomplete.
     private var allTagSuggestions: [String] {
         appState.tags.map(\.tag)
@@ -105,36 +94,12 @@ struct NoteEditorView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
         guard !clean.isEmpty else { return }
-
-        // Already present anywhere in the body? Don't duplicate.
-        let escaped = NSRegularExpression.escapedPattern(for: clean)
-        let existsPattern = #"(?<![\p{L}\p{N}_/\-])#"# + escaped + #"(?![\p{L}\p{N}_/\-])"#
-        if let regex = try? NSRegularExpression(pattern: existsPattern) {
-            let fullRange = NSRange(appState.currentNoteBody.startIndex...,
-                                    in: appState.currentNoteBody)
-            if regex.firstMatch(in: appState.currentNoteBody, range: fullRange) != nil {
-                return
-            }
-        }
-
-        var body = appState.currentNoteBody
-        if !body.isEmpty, !body.hasSuffix(" "), !body.hasSuffix("\n") {
-            body.append(" ")
-        }
-        body.append("#\(clean)")
-        appState.currentNoteBody = body
+        guard !appState.currentNoteTags.contains(clean) else { return }
+        appState.currentNoteTags.append(clean)
     }
 
     private func removeTag(_ tag: String) {
-        let escaped = NSRegularExpression.escapedPattern(for: tag)
-        // Match optional leading space + #tag at word boundary, so we
-        // consume the separator and don't leave `foo  bar` double spaces.
-        let pattern = #" ?(?<![\p{L}\p{N}_/\-])#"# + escaped + #"(?![\p{L}\p{N}_/\-])"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
-        let body = appState.currentNoteBody
-        let fullRange = NSRange(body.startIndex..., in: body)
-        let newBody = regex.stringByReplacingMatches(in: body, range: fullRange, withTemplate: "")
-        appState.currentNoteBody = newBody
+        appState.currentNoteTags.removeAll { $0 == tag }
     }
 
     // MARK: - Misc

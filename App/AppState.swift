@@ -19,6 +19,11 @@ final class AppState: ObservableObject {
     /// Body WITHOUT the title H1 line. Round-trips as `# <title>\n\n<body>`
     /// when combined for save.
     @Published var currentNoteBody: String = ""
+    /// Tags managed by the editor's tag bar. Persisted as a YAML
+    /// frontmatter array (`tags: [foo, bar]`) so the body stays clean
+    /// for export and so other markdown editors (Obsidian, iA Writer)
+    /// recognize them.
+    @Published var currentNoteTags: [String] = []
     /// Incremented by the toolbar/⌘K handler to ask the active editor to
     /// insert `[[` at the cursor (which triggers the existing wikilink
     /// autocomplete). MarkdownTextView observes this counter.
@@ -182,16 +187,94 @@ final class AppState: ObservableObject {
         }
         let url = vault.url(for: id)
         let fullContent = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let (title, body) = Self.splitTitleAndBody(fullContent)
+        let parsed = Self.parseNote(fullContent)
         self.currentNoteID = id
-        self.currentNoteTitle = title
-        self.currentNoteBody = body
+        self.currentNoteTitle = parsed.title
+        self.currentNoteBody = parsed.body
+        self.currentNoteTags = parsed.tags
         self.backlinks = (try? index.backlinks(to: id)) ?? []
         try? index.recordView(id: id)
     }
 
     func requestInsertLink() {
         insertLinkRequest &+= 1
+    }
+
+    struct ParsedNote {
+        let title: String
+        let body: String
+        let tags: [String]
+    }
+
+    /// Parse the full `.md` content into editable parts: optional YAML
+    /// frontmatter tags, an optional H1 title line, and the remaining body.
+    /// Frontmatter is stripped from `body` so the editor only shows the
+    /// user's writing — tags are managed separately by the tag bar.
+    static func parseNote(_ fullContent: String) -> ParsedNote {
+        var content = fullContent
+        var tags: [String] = []
+
+        if content.hasPrefix("---\n") {
+            let afterOpen = content.index(content.startIndex, offsetBy: 4)
+            if let close = content.range(of: "\n---\n", range: afterOpen..<content.endIndex) {
+                let fmText = String(content[afterOpen..<close.lowerBound])
+                tags = parseTagsFromYAML(fmText)
+                content = String(content[close.upperBound...])
+            } else if let close = content.range(of: "\n---\r\n", range: afterOpen..<content.endIndex) {
+                let fmText = String(content[afterOpen..<close.lowerBound])
+                tags = parseTagsFromYAML(fmText)
+                content = String(content[close.upperBound...])
+            }
+        }
+
+        let (title, body) = splitTitleAndBody(content)
+        return ParsedNote(title: title, body: body, tags: tags)
+    }
+
+    /// Render the editor state back to a markdown file. Tags are emitted as
+    /// a YAML frontmatter array if non-empty; otherwise the file has no
+    /// frontmatter block at all.
+    static func renderNote(title: String, body: String, tags: [String]) -> String {
+        let cleanTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let core = combineTitleAndBody(title: title, body: body)
+        guard !cleanTags.isEmpty else { return core }
+        let tagsLine = cleanTags.joined(separator: ", ")
+        return "---\ntags: [\(tagsLine)]\n---\n\(core)"
+    }
+
+    /// Pulls the `tags:` line out of a YAML frontmatter block. Supports the
+    /// inline list form (`tags: [a, b]`) we always emit, and the block form
+    /// (`tags:\n  - a\n  - b`) that other editors sometimes produce.
+    static func parseTagsFromYAML(_ fm: String) -> [String] {
+        let lines = fm.components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("tags:") else { continue }
+            let value = trimmed.dropFirst("tags:".count).trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("[") && value.hasSuffix("]") {
+                let inside = value.dropFirst().dropLast()
+                return inside
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+                    .filter { !$0.isEmpty }
+            }
+            // Block form: subsequent lines beginning with `- `.
+            var collected: [String] = []
+            for sub in lines.dropFirst(i + 1) {
+                let s = sub.trimmingCharacters(in: .whitespaces)
+                if s.hasPrefix("- ") {
+                    let item = String(s.dropFirst(2))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                    if !item.isEmpty { collected.append(item) }
+                } else if !s.isEmpty {
+                    break
+                }
+            }
+            return collected
+        }
+        return []
     }
 
     /// Split a note's full `.md` content into an explicit title (from the
@@ -236,7 +319,11 @@ final class AppState: ObservableObject {
             return
         }
         let url = vault.url(for: id)
-        let fullContent = Self.combineTitleAndBody(title: currentNoteTitle, body: currentNoteBody)
+        let fullContent = Self.renderNote(
+            title: currentNoteTitle,
+            body: currentNoteBody,
+            tags: currentNoteTags
+        )
         do {
             try writer.write(fullContent, to: url)
             NSLog("[Slip] saved \(fullContent.count) chars to \(url.path)")
@@ -266,6 +353,7 @@ final class AppState: ObservableObject {
             currentNoteID = note.id
             currentNoteTitle = ""
             currentNoteBody = ""
+            currentNoteTags = []
             markInternalWrite(url: note.url)
             reindexIncrementally([note.url])
         } catch {

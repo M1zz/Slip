@@ -51,7 +51,7 @@ public final class VaultIndexer {
                 let refs = WikilinkParser.references(in: raw.body)
 
                 var outgoing: [NoteIndex.OutgoingLink] = []
-                var tags: [String] = []
+                var tags: [String] = Self.extractFrontmatterTags(body: raw.body)
                 for ref in refs {
                     switch ref.kind {
                     case .wikilink(let target, _):
@@ -155,7 +155,7 @@ public final class VaultIndexer {
 
                 let refs = WikilinkParser.references(in: body)
                 var outgoing: [NoteIndex.OutgoingLink] = []
-                var tags: [String] = []
+                var tags: [String] = Self.extractFrontmatterTags(body: body)
                 for ref in refs {
                     switch ref.kind {
                     case .wikilink(let target, _):
@@ -213,6 +213,45 @@ public final class VaultIndexer {
     }
 
     // MARK: - Helpers
+
+    /// Tags declared in YAML frontmatter (`tags: [foo, bar]` or block form).
+    /// Combined with inline `#tags` from the body to make up the full tag set
+    /// for a note.
+    static func extractFrontmatterTags(body: String) -> [String] {
+        guard body.hasPrefix("---\n") else { return [] }
+        guard let close = body.range(of: "\n---\n",
+                                     range: body.index(body.startIndex, offsetBy: 4)..<body.endIndex)
+            ?? body.range(of: "\n---\r\n",
+                          range: body.index(body.startIndex, offsetBy: 4)..<body.endIndex)
+        else { return [] }
+        let fmText = String(body[body.index(body.startIndex, offsetBy: 4)..<close.lowerBound])
+
+        let lines = fmText.components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("tags:") else { continue }
+            let value = trimmed.dropFirst("tags:".count).trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("[") && value.hasSuffix("]") {
+                return value.dropFirst().dropLast()
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+                    .filter { !$0.isEmpty }
+            }
+            var collected: [String] = []
+            for sub in lines.dropFirst(i + 1) {
+                let s = sub.trimmingCharacters(in: .whitespaces)
+                if s.hasPrefix("- ") {
+                    let item = String(s.dropFirst(2))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                    if !item.isEmpty { collected.append(item) }
+                } else if !s.isEmpty {
+                    break
+                }
+            }
+            return collected
+        }
+        return []
+    }
 
     private static func extractTitle(body: String, fallbackFilename: String) -> String {
         // 1. frontmatter `title:` key.

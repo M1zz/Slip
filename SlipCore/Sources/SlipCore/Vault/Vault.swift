@@ -68,6 +68,31 @@ public final class Vault: @unchecked Sendable {
 
     // MARK: - Enumeration
 
+    /// Walk the vault and yield every subdirectory URL (so the sidebar
+    /// tree can show empty folders the user just created).
+    public func enumerateDirectories() throws -> [URL] {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        let options: FileManager.DirectoryEnumerationOptions = [
+            .skipsHiddenFiles,
+            .skipsPackageDescendants
+        ]
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: options
+        ) else { return [] }
+
+        var dirs: [URL] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: Set(keys))
+            if values.isDirectory == true {
+                dirs.append(url)
+            }
+        }
+        return dirs
+    }
+
     /// Walk the vault and yield every `.md` file URL. The caller must have
     /// an active security scope (via `withAccess`) or the vault must already
     /// be accessing.

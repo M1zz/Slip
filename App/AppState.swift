@@ -39,6 +39,10 @@ final class AppState: ObservableObject {
     @Published var selectedTag: String? {
         didSet { applyTagFilter() }
     }
+    /// Relative paths of all folders inside the vault (empty or not).
+    /// Drives both the empty-folder display in the sidebar tree and the
+    /// "Move to…" submenu choices.
+    @Published var allFolders: [String] = []
 
     /// Full list from the index; `noteList` reflects the current tag filter.
     private var allNoteIDs: [NoteID] = []
@@ -151,10 +155,33 @@ final class AppState: ObservableObject {
                 try index.allMetrics().map { ($0.id, $0.title) }
             )
             self.tags = (try? index.listTags()) ?? []
+            self.allFolders = listFoldersOnDisk()
             applyTagFilter()
             refreshRediscovery()
         } catch {
             NSLog("Refresh failed: \(error)")
+        }
+    }
+
+    /// Snapshot the vault's directory tree so we can show empty folders
+    /// in the sidebar and offer them in "Move to…" submenus.
+    private func listFoldersOnDisk() -> [String] {
+        guard let vault else { return [] }
+        do {
+            let urls = try vault.withAccess { _ in try vault.enumerateDirectories() }
+            let rootPath = vault.root.standardizedFileURL.path
+            var rels: [String] = []
+            for url in urls {
+                let abs = url.standardizedFileURL.path
+                guard abs.hasPrefix(rootPath) else { continue }
+                var rel = String(abs.dropFirst(rootPath.count))
+                if rel.hasPrefix("/") { rel.removeFirst() }
+                if !rel.isEmpty { rels.append(rel) }
+            }
+            return rels.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        } catch {
+            NSLog("[Slip] enumerateDirectories failed: \(error)")
+            return []
         }
     }
 
@@ -395,7 +422,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    func createNewNote() {
+    func createNewNote(in folder: String = "") {
         guard let vault else {
             NSLog("[Slip] createNewNote skipped: no vault")
             return
@@ -405,11 +432,7 @@ final class AppState: ObservableObject {
             saveCurrentNote()
         }
         do {
-            // Empty body — the title will come from whatever the user types on
-            // the first line (see VaultIndexer.extractTitle's first-non-empty
-            // fallback). No placeholder avoids the stale "Untitled" H1 sticking
-            // around when the user types below it instead of replacing it.
-            let note = try writer.createNew(in: vault, title: "Untitled", body: "")
+            let note = try writer.createNew(in: vault, title: "Untitled", folder: folder, body: "")
             NSLog("[Slip] created note at \(note.url.path)")
             currentNoteID = note.id
             currentNoteTitle = ""
@@ -419,6 +442,68 @@ final class AppState: ObservableObject {
             reindexIncrementally([note.url])
         } catch {
             NSLog("[Slip] Create failed in \(vault.root.path): \(error)")
+        }
+    }
+
+    func createFolder(name: String, in parent: String = "") {
+        guard let vault else { return }
+        let cleanName = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: CharacterSet(charactersIn: "/\\?%*|\"<>:"))
+            .joined(separator: "-")
+        guard !cleanName.isEmpty else { return }
+
+        let parentURL = parent.isEmpty
+            ? vault.root
+            : vault.root.appendingPathComponent(parent)
+        let target = parentURL.appendingPathComponent(cleanName)
+        do {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            NSLog("[Slip] created folder at \(target.path)")
+            self.allFolders = listFoldersOnDisk()
+        } catch {
+            NSLog("[Slip] Create folder failed: \(error)")
+        }
+    }
+
+    /// Move a note to another folder. `destinationFolder` is the relative
+    /// path inside the vault ("" for vault root). Filenames keep the same
+    /// basename; if a collision exists we suffix " 2", " 3", etc.
+    func moveNote(_ id: NoteID, toFolder destinationFolder: String) {
+        guard let vault else { return }
+        let oldURL = vault.url(for: id)
+        let filename = oldURL.lastPathComponent
+        let parentURL = destinationFolder.isEmpty
+            ? vault.root
+            : vault.root.appendingPathComponent(destinationFolder)
+        // Skip no-op moves (already in that folder).
+        if parentURL.standardizedFileURL == oldURL.deletingLastPathComponent().standardizedFileURL {
+            return
+        }
+        do {
+            if !FileManager.default.fileExists(atPath: parentURL.path) {
+                try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            }
+            // Resolve filename collision.
+            let stem = (filename as NSString).deletingPathExtension
+            let ext = (filename as NSString).pathExtension
+            var candidate = parentURL.appendingPathComponent(filename)
+            var n = 1
+            while FileManager.default.fileExists(atPath: candidate.path) {
+                n += 1
+                candidate = parentURL.appendingPathComponent("\(stem) \(n).\(ext)")
+            }
+            try FileManager.default.moveItem(at: oldURL, to: candidate)
+            NSLog("[Slip] moved \(oldURL.path) → \(candidate.path)")
+            markInternalWrite(url: oldURL)
+            markInternalWrite(url: candidate)
+            reindexIncrementally([oldURL, candidate])
+            // Repoint currentNoteID if the moved note was the one being edited.
+            if currentNoteID == id, let newID = try? vault.noteID(for: candidate) {
+                self.currentNoteID = newID
+            }
+        } catch {
+            NSLog("[Slip] Move failed (\(oldURL.path) → \(parentURL.path)): \(error)")
         }
     }
 

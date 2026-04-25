@@ -1,20 +1,23 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import SlipCore
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     @State private var notesExpanded: Bool = true
     @State private var tagsExpanded: Bool = true
+    @State private var newFolderPrompt: NewFolderPrompt? = nil
 
     private var displayed: [NoteID] {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
     }
 
-    /// Folder-aware tree of the currently displayed notes. Folders only
-    /// appear if they contain at least one note in the visible set, so a
-    /// tag filter or search hides empty branches automatically.
     private var noteTree: [FileTreeNode] {
-        Self.buildTree(noteIDs: displayed, titleByID: appState.titleByID)
+        Self.buildTree(
+            noteIDs: displayed,
+            titleByID: appState.titleByID,
+            folders: appState.allFolders
+        )
     }
 
     var body: some View {
@@ -39,12 +42,7 @@ struct SidebarView: View {
             )) {
                 Section(isExpanded: $notesExpanded) {
                     OutlineGroup(noteTree, id: \.id, children: \.children) { node in
-                        switch node.kind {
-                        case .folder(let name):
-                            FolderRow(name: name)
-                        case .note(let id, let title):
-                            NoteRow(id: id, title: title).tag(id)
-                        }
+                        rowView(for: node)
                     }
                 } header: {
                     Text(notesSectionTitle)
@@ -78,13 +76,83 @@ struct SidebarView: View {
             .listStyle(.sidebar)
         }
         .toolbar {
-            ToolbarItem {
+            ToolbarItemGroup {
                 Button(action: { appState.createNewNote() }) {
                     Image(systemName: "square.and.pencil")
                 }
                 .help("New Note (⌘N)")
+
+                Button {
+                    newFolderPrompt = NewFolderPrompt(parent: "")
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .help("New Folder")
             }
         }
+        .sheet(item: $newFolderPrompt) { prompt in
+            NewFolderSheet(parent: prompt.parent) { name in
+                appState.createFolder(name: name, in: prompt.parent)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rowView(for node: FileTreeNode) -> some View {
+        switch node.kind {
+        case .folder(let name, let path):
+            FolderRow(name: name)
+                .contextMenu {
+                    Button("New Note Here") {
+                        Task { @MainActor in appState.createNewNote(in: path) }
+                    }
+                    Button("New Subfolder…") {
+                        newFolderPrompt = NewFolderPrompt(parent: path)
+                    }
+                }
+                .onDrop(of: [.utf8PlainText], isTargeted: nil) { providers in
+                    handleDrop(providers: providers, into: path)
+                }
+        case .note(let id, let title):
+            NoteRow(id: id, title: title)
+                .tag(id)
+                .contextMenu {
+                    Menu("Move to") {
+                        Button("Vault Root") {
+                            Task { @MainActor in appState.moveNote(id, toFolder: "") }
+                        }
+                        if !appState.allFolders.isEmpty {
+                            Divider()
+                            ForEach(appState.allFolders, id: \.self) { folder in
+                                Button(folder) {
+                                    Task { @MainActor in
+                                        appState.moveNote(id, toFolder: folder)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .onDrag {
+                    NSItemProvider(object: id.relativePath as NSString)
+                }
+        }
+    }
+
+    private func handleDrop(providers: [NSItemProvider], into folderPath: String) -> Bool {
+        var handled = false
+        for provider in providers {
+            guard provider.canLoadObject(ofClass: NSString.self) else { continue }
+            handled = true
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let s = object as? NSString else { return }
+                let id = NoteID(relativePath: s as String)
+                Task { @MainActor in
+                    appState.moveNote(id, toFolder: folderPath)
+                }
+            }
+        }
+        return handled
     }
 
     private var notesSectionTitle: String {
@@ -94,17 +162,37 @@ struct SidebarView: View {
         return "Notes"
     }
 
-    /// Build a folder/file tree from the flat list of note IDs. The
-    /// algorithm walks each note's relative path component-by-component,
-    /// lazily creating intermediate folder branches in a temporary tree
-    /// and then renders that into a sorted, recursive `FileTreeNode` list.
-    static func buildTree(noteIDs: [NoteID], titleByID: [NoteID: String]) -> [FileTreeNode] {
+    /// Build a folder/file tree from the flat list of note IDs and folder
+    /// paths. Folders are pre-seeded from `folders` so that newly created
+    /// empty folders show up before any note has been added to them.
+    static func buildTree(
+        noteIDs: [NoteID],
+        titleByID: [NoteID: String],
+        folders: [String]
+    ) -> [FileTreeNode] {
         final class Branch {
             var subFolders: [String: Branch] = [:]
             var notes: [(id: NoteID, title: String)] = []
         }
 
         let root = Branch()
+
+        // Pre-create empty folders.
+        for path in folders {
+            let parts = path.split(separator: "/").map(String.init)
+            var current = root
+            for folder in parts {
+                if let next = current.subFolders[folder] {
+                    current = next
+                } else {
+                    let next = Branch()
+                    current.subFolders[folder] = next
+                    current = next
+                }
+            }
+        }
+
+        // Place every note in its folder.
         for id in noteIDs {
             let parts = id.relativePath.split(separator: "/").map(String.init)
             guard !parts.isEmpty else { continue }
@@ -124,7 +212,6 @@ struct SidebarView: View {
 
         func render(_ branch: Branch, parentPath: String) -> [FileTreeNode] {
             var nodes: [FileTreeNode] = []
-            // Folders first, alphabetically.
             for (name, sub) in branch.subFolders.sorted(by: {
                 $0.key.localizedStandardCompare($1.key) == .orderedAscending
             }) {
@@ -132,7 +219,6 @@ struct SidebarView: View {
                 let children = render(sub, parentPath: fullPath)
                 nodes.append(.folder(name: name, path: fullPath, children: children))
             }
-            // Notes after, by title.
             for (id, title) in branch.notes.sorted(by: {
                 $0.title.localizedStandardCompare($1.title) == .orderedAscending
             }) {
@@ -150,21 +236,62 @@ struct SidebarView: View {
 struct FileTreeNode: Identifiable {
     let id: String
     let kind: Kind
-    /// `nil` for notes (so OutlineGroup doesn't render a disclosure
-    /// triangle), an array (possibly empty) for folders.
     let children: [FileTreeNode]?
 
     enum Kind {
-        case folder(name: String)
+        case folder(name: String, path: String)
         case note(id: NoteID, title: String)
     }
 
     static func folder(name: String, path: String, children: [FileTreeNode]) -> FileTreeNode {
-        FileTreeNode(id: "f:\(path)", kind: .folder(name: name), children: children)
+        FileTreeNode(id: "f:\(path)", kind: .folder(name: name, path: path), children: children)
     }
 
     static func note(id: NoteID, title: String) -> FileTreeNode {
         FileTreeNode(id: "n:\(id.relativePath)", kind: .note(id: id, title: title), children: nil)
+    }
+}
+
+// MARK: - New folder prompt
+
+private struct NewFolderPrompt: Identifiable {
+    let id = UUID()
+    let parent: String
+}
+
+private struct NewFolderSheet: View {
+    let parent: String
+    let onCreate: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(parent.isEmpty ? "New Folder" : "New Folder in \(parent)")
+                .font(.headline)
+            TextField("Folder name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit { create() }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Create") { create() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .onAppear { nameFocused = true }
+    }
+
+    private func create() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onCreate(trimmed)
+        dismiss()
     }
 }
 

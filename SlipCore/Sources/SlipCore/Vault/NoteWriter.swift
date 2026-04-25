@@ -21,14 +21,23 @@ public final class NoteWriter {
         try body.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    public func createNew(in vault: Vault, title: String, body: String = "") throws -> Note {
+    public func createNew(in vault: Vault, title: String, folder: String = "", body: String = "") throws -> Note {
         let fm = FileManager.default
         let safeTitle = Self.safeFilename(from: title)
-        var candidateURL = vault.root.appendingPathComponent("\(safeTitle).md")
+        let parentURL: URL
+        if folder.isEmpty {
+            parentURL = vault.root
+        } else {
+            parentURL = vault.root.appendingPathComponent(folder)
+            if !fm.fileExists(atPath: parentURL.path) {
+                try fm.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            }
+        }
+        var candidateURL = parentURL.appendingPathComponent("\(safeTitle).md")
         var suffix = 1
         while fm.fileExists(atPath: candidateURL.path) {
             suffix += 1
-            candidateURL = vault.root.appendingPathComponent("\(safeTitle) \(suffix).md")
+            candidateURL = parentURL.appendingPathComponent("\(safeTitle) \(suffix).md")
         }
 
         try write(body, to: candidateURL)

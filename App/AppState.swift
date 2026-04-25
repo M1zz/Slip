@@ -277,9 +277,14 @@ final class AppState: ObservableObject {
         return []
     }
 
-    /// Split a note's full `.md` content into an explicit title (from the
-    /// first H1 line, if any) and the remaining body. Leading blank lines
-    /// are preserved only if there was no H1 to consume.
+    /// Split a note's full `.md` content into an explicit title and the
+    /// remaining body. The title is taken from (in priority order):
+    ///   1. the first H1 line (`# ...`),
+    ///   2. otherwise the first non-empty line, with leading block markers
+    ///      stripped (`>`, `-`, `*`).
+    /// Either way the title line is removed from body so the field and the
+    /// editor don't show the same text twice. This keeps the title field
+    /// in sync with what the sidebar shows for the same note.
     static func splitTitleAndBody(_ fullContent: String) -> (title: String, body: String) {
         let lines = fullContent.components(separatedBy: "\n")
         var i = 0
@@ -287,17 +292,31 @@ final class AppState: ObservableObject {
             i += 1
         }
         guard i < lines.count else { return ("", fullContent) }
-        let first = lines[i].trimmingCharacters(in: .whitespaces)
-        guard first.hasPrefix("# ") else { return ("", fullContent) }
-        let title = String(first.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        let firstTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
 
-        // Drop the H1 line and one trailing blank line if present.
+        let title: String
+        if firstTrimmed.hasPrefix("# ") {
+            title = String(firstTrimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        } else {
+            // Fallback: first non-empty line, stripped of any leading
+            // markdown block syntax (matching VaultIndexer.extractTitle).
+            title = stripLeadingMarkdownSyntax(firstTrimmed)
+        }
+        guard !title.isEmpty else { return ("", fullContent) }
+
         var after = i + 1
         if after < lines.count, lines[after].trimmingCharacters(in: .whitespaces).isEmpty {
             after += 1
         }
         let body = after >= lines.count ? "" : lines[after...].joined(separator: "\n")
         return (title, body)
+    }
+
+    private static func stripLeadingMarkdownSyntax(_ line: String) -> String {
+        var s = line
+        while s.hasPrefix("#") { s = String(s.dropFirst()) }
+        while let first = s.first, "><-*".contains(first) { s = String(s.dropFirst()) }
+        return s.trimmingCharacters(in: .whitespaces)
     }
 
     /// Rejoin the edited title and body into a full markdown document. Empty

@@ -18,7 +18,7 @@ struct NoteEditorView: View {
                     // from within view updates" warning that a manually-
                     // wrapped Binding(get:set:) hits when SwiftUI processes
                     // text-input deltas during the same render pass.
-                    TextField("Title", text: $appState.currentNoteTitle)
+                    TextField("제목 없음", text: $appState.currentNoteTitle)
                         .textFieldStyle(.plain)
                         .font(.system(size: 24, weight: .semibold))
                         .focused($titleFocused)

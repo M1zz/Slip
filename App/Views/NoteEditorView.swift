@@ -197,11 +197,18 @@ private struct TagBar: View {
             .trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
             .lowercased()
-        guard !q.isEmpty else { return [] }
         let existing = Set(currentTags)
+        // Empty input: surface all vault tags the note doesn't already
+        // have, so the user can pick from existing ones without retyping.
+        if q.isEmpty {
+            return allTags
+                .filter { !existing.contains($0) }
+                .prefix(8)
+                .map { $0 }
+        }
         return allTags
             .filter { !existing.contains($0) && $0.lowercased().contains(q) && $0.lowercased() != q }
-            .prefix(4)
+            .prefix(8)
             .map { $0 }
     }
 

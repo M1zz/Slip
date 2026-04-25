@@ -3,6 +3,7 @@ import SlipCore
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
+    @State private var notesExpanded: Bool = true
     @State private var tagsExpanded: Bool = true
 
     private var displayed: [NoteID] {
@@ -32,11 +33,13 @@ struct SidebarView: View {
                     Task { @MainActor in appState.openNote(id) }
                 }
             )) {
-                Section(notesSectionTitle) {
+                Section(isExpanded: $notesExpanded) {
                     ForEach(displayed, id: \.self) { id in
                         NoteRow(id: id, title: appState.titleByID[id] ?? id.relativePath)
                             .tag(id)
                     }
+                } header: {
+                    Text(notesSectionTitle)
                 }
 
                 if !appState.tags.isEmpty {

@@ -10,6 +10,13 @@ struct SidebarView: View {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
     }
 
+    /// Folder-aware tree of the currently displayed notes. Folders only
+    /// appear if they contain at least one note in the visible set, so a
+    /// tag filter or search hides empty branches automatically.
+    private var noteTree: [FileTreeNode] {
+        Self.buildTree(noteIDs: displayed, titleByID: appState.titleByID)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -26,17 +33,18 @@ struct SidebarView: View {
             List(selection: Binding(
                 get: { appState.currentNoteID },
                 set: { newValue in
-                    // Defer the state mutation out of the view-update cycle;
-                    // SwiftUI complains if @Published values change synchronously
-                    // from inside a binding's setter during view computation.
                     guard let id = newValue else { return }
                     Task { @MainActor in appState.openNote(id) }
                 }
             )) {
                 Section(isExpanded: $notesExpanded) {
-                    ForEach(displayed, id: \.self) { id in
-                        NoteRow(id: id, title: appState.titleByID[id] ?? id.relativePath)
-                            .tag(id)
+                    OutlineGroup(noteTree, id: \.id, children: \.children) { node in
+                        switch node.kind {
+                        case .folder(let name):
+                            FolderRow(name: name)
+                        case .note(let id, let title):
+                            NoteRow(id: id, title: title).tag(id)
+                        }
                     }
                 } header: {
                     Text(notesSectionTitle)
@@ -85,7 +93,82 @@ struct SidebarView: View {
         }
         return "Notes"
     }
+
+    /// Build a folder/file tree from the flat list of note IDs. The
+    /// algorithm walks each note's relative path component-by-component,
+    /// lazily creating intermediate folder branches in a temporary tree
+    /// and then renders that into a sorted, recursive `FileTreeNode` list.
+    static func buildTree(noteIDs: [NoteID], titleByID: [NoteID: String]) -> [FileTreeNode] {
+        final class Branch {
+            var subFolders: [String: Branch] = [:]
+            var notes: [(id: NoteID, title: String)] = []
+        }
+
+        let root = Branch()
+        for id in noteIDs {
+            let parts = id.relativePath.split(separator: "/").map(String.init)
+            guard !parts.isEmpty else { continue }
+            var current = root
+            for folder in parts.dropLast() {
+                if let next = current.subFolders[folder] {
+                    current = next
+                } else {
+                    let next = Branch()
+                    current.subFolders[folder] = next
+                    current = next
+                }
+            }
+            let title = titleByID[id] ?? id.relativePath
+            current.notes.append((id, title))
+        }
+
+        func render(_ branch: Branch, parentPath: String) -> [FileTreeNode] {
+            var nodes: [FileTreeNode] = []
+            // Folders first, alphabetically.
+            for (name, sub) in branch.subFolders.sorted(by: {
+                $0.key.localizedStandardCompare($1.key) == .orderedAscending
+            }) {
+                let fullPath = parentPath.isEmpty ? name : "\(parentPath)/\(name)"
+                let children = render(sub, parentPath: fullPath)
+                nodes.append(.folder(name: name, path: fullPath, children: children))
+            }
+            // Notes after, by title.
+            for (id, title) in branch.notes.sorted(by: {
+                $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }) {
+                nodes.append(.note(id: id, title: title))
+            }
+            return nodes
+        }
+
+        return render(root, parentPath: "")
+    }
 }
+
+// MARK: - Tree model
+
+struct FileTreeNode: Identifiable {
+    let id: String
+    let kind: Kind
+    /// `nil` for notes (so OutlineGroup doesn't render a disclosure
+    /// triangle), an array (possibly empty) for folders.
+    let children: [FileTreeNode]?
+
+    enum Kind {
+        case folder(name: String)
+        case note(id: NoteID, title: String)
+    }
+
+    static func folder(name: String, path: String, children: [FileTreeNode]) -> FileTreeNode {
+        FileTreeNode(id: "f:\(path)", kind: .folder(name: name), children: children)
+    }
+
+    static func note(id: NoteID, title: String) -> FileTreeNode {
+        FileTreeNode(id: "n:\(id.relativePath)", kind: .note(id: id, title: title), children: nil)
+    }
+}
+
+// MARK: - Rows
 
 private struct NoteRow: View {
     let id: NoteID
@@ -97,6 +180,21 @@ private struct NoteRow: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
             Text(title)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct FolderRow: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder.fill")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            Text(name)
+                .fontWeight(.medium)
                 .lineLimit(1)
         }
     }

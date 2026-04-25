@@ -210,25 +210,67 @@ final class AppState: ObservableObject {
     /// frontmatter tags, an optional H1 title line, and the remaining body.
     /// Frontmatter is stripped from `body` so the editor only shows the
     /// user's writing — tags are managed separately by the tag bar.
+    /// Inline `#tags` left in the body (from notes written before this
+    /// scheme) are also extracted into the tag list and removed from the
+    /// body — saving the note then writes them back as frontmatter, so
+    /// notes get migrated quietly the next time they're opened.
     static func parseNote(_ fullContent: String) -> ParsedNote {
         var content = fullContent
-        var tags: [String] = []
+        var fmTags: [String] = []
 
         if content.hasPrefix("---\n") {
             let afterOpen = content.index(content.startIndex, offsetBy: 4)
             if let close = content.range(of: "\n---\n", range: afterOpen..<content.endIndex) {
                 let fmText = String(content[afterOpen..<close.lowerBound])
-                tags = parseTagsFromYAML(fmText)
+                fmTags = parseTagsFromYAML(fmText)
                 content = String(content[close.upperBound...])
             } else if let close = content.range(of: "\n---\r\n", range: afterOpen..<content.endIndex) {
                 let fmText = String(content[afterOpen..<close.lowerBound])
-                tags = parseTagsFromYAML(fmText)
+                fmTags = parseTagsFromYAML(fmText)
                 content = String(content[close.upperBound...])
             }
         }
 
-        let (title, body) = splitTitleAndBody(content)
-        return ParsedNote(title: title, body: body, tags: tags)
+        let (title, rawBody) = splitTitleAndBody(content)
+        let (cleanBody, inlineTags) = extractInlineTagsFromBody(rawBody)
+
+        // Merge frontmatter + inline tags, dedup, frontmatter first.
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for t in fmTags + inlineTags where !seen.contains(t) {
+            seen.insert(t)
+            ordered.append(t)
+        }
+        return ParsedNote(title: title, body: cleanBody, tags: ordered)
+    }
+
+    /// Pull every `#tag` reference out of `body` and return both the
+    /// cleaned body and the tag strings (in source order). One leading
+    /// space per match is also consumed so we don't leave double spaces
+    /// behind.
+    static func extractInlineTagsFromBody(_ body: String) -> (cleanBody: String, tags: [String]) {
+        let refs = WikilinkParser.references(in: body)
+        let tagRefs = refs.compactMap { ref -> (String, Range<Int>)? in
+            if case .tag(let t) = ref.kind { return (t, ref.range) }
+            return nil
+        }
+        guard !tagRefs.isEmpty else { return (body, []) }
+
+        var result = body as NSString
+        // Apply edits highest-offset first so earlier ranges stay valid.
+        let descending = tagRefs.sorted { $0.1.lowerBound > $1.1.lowerBound }
+        for (_, range) in descending {
+            var nsRange = NSRange(location: range.lowerBound, length: range.upperBound - range.lowerBound)
+            if nsRange.location > 0 {
+                let prev = result.character(at: nsRange.location - 1)
+                if prev == 0x20 { // ASCII space — don't touch newlines
+                    nsRange = NSRange(location: nsRange.location - 1, length: nsRange.length + 1)
+                }
+            }
+            result = result.replacingCharacters(in: nsRange, with: "") as NSString
+        }
+        let tagsInOrder = tagRefs.sorted { $0.1.lowerBound < $1.1.lowerBound }.map { $0.0 }
+        return (result as String, tagsInOrder)
     }
 
     /// Render the editor state back to a markdown file. Tags are emitted as

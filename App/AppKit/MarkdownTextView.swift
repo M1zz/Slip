@@ -517,7 +517,8 @@ final class MarkdownAwareTextView: NSTextView {
         let markdown = Self.convertHTMLToMarkdown(html)
         let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        NSLog("[Slip] paste: HTML→markdown preview: \(String(trimmed.prefix(200)))…")
+        NSLog("[Slip] paste: HTML in (first 800): \(String(html.prefix(800)))")
+        NSLog("[Slip] paste: markdown out (first 800): \(String(trimmed.prefix(800)))")
         insertText(markdown, replacementRange: selectedRange())
         return true
     }
@@ -688,6 +689,7 @@ final class MarkdownAwareTextView: NSTextView {
         let ns = input as NSString
         var result = ""
         var cursor = 0
+        var converted = 0
         regex.enumerateMatches(in: input, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
             guard let m = match, m.numberOfRanges >= 4 else { return }
             let outer = m.range
@@ -702,28 +704,48 @@ final class MarkdownAwareTextView: NSTextView {
             }
 
             let url = ns.substring(with: urlRange)
-            let cleaned = cleanInlineText(ns.substring(with: inner))
-            if cleaned.isEmpty {
-                // Empty label → emit the bare URL so the user still sees
-                // something rather than a phantom `[](url)` link.
-                result += url
+            let label = cleanLinkLabel(ns.substring(with: inner))
+            let safeURL = encodeLinkURL(url)
+            converted += 1
+            NSLog("[Slip] paste link: label='\(label)' url='\(url)'")
+            if label.isEmpty {
+                // Phantom `[](url)` would render as nothing; emit a bare
+                // autolink instead so the user still has something
+                // clickable.
+                result += "<\(safeURL)>"
             } else {
-                result += "[\(cleaned)](\(url))"
+                result += "[\(label)](\(safeURL))"
             }
             cursor = outer.location + outer.length
         }
         if cursor < ns.length {
             result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
         }
+        NSLog("[Slip] paste: converted \(converted) anchors")
         return result
     }
 
-    /// Strip nested tags and collapse whitespace runs into a single
-    /// space, so the output is safe to embed in CommonMark `[…]`.
-    private static func cleanInlineText(_ s: String) -> String {
+    /// Make a string safe to use as a markdown link label inside `[…]`.
+    /// Strips nested tags, collapses whitespace, and escapes `[` / `]`
+    /// so a label like `Step [1]: …` doesn't break the parser.
+    private static func cleanLinkLabel(_ s: String) -> String {
         var out = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         out = out.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        out = out
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// CommonMark's bare URL form (no surrounding `<>`) doesn't allow
+    /// unbalanced parens or whitespace. If we detect either, wrap in
+    /// angle brackets — the angle-bracketed form does allow them.
+    private static func encodeLinkURL(_ url: String) -> String {
+        if url.contains(" ") || url.contains("(") || url.contains(")") {
+            return "<\(url)>"
+        }
+        return url
     }
 
     /// Convert an attributed string (from HTML/RTF) into a markdown

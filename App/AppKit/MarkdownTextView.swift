@@ -580,17 +580,16 @@ final class MarkdownAwareTextView: NSTextView {
         s = replaceTag(in: s, tag: "i") { "*\($0)*" }
         s = replaceTag(in: s, tag: "code") { "`\($0)`" }
 
-        // 3. Links: capture href and inner text together.
-        s = s.replacingOccurrences(
-            of: #"<a\b[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)</a>"#,
-            with: "[$2]($1)",
-            options: .regularExpression
-        )
-        s = s.replacingOccurrences(
-            of: #"<a\b[^>]*href\s*=\s*'([^']*)'[^>]*>([\s\S]*?)</a>"#,
-            with: "[$2]($1)",
-            options: .regularExpression
-        )
+        // 3. Links. Custom enumerator instead of a plain regex replace so
+        //    we can trim/collapse whitespace inside the link text.
+        //    Substack & friends often emit
+        //      <a href="…">
+        //        <button>Label →</button>
+        //      </a>
+        //    Naive replacement gave `[\n  Label →\n](url)`, which
+        //    CommonMark refuses to parse as a link (newlines inside
+        //    `[…]` aren't allowed) — so the brackets stayed visible.
+        s = Self.replaceAnchors(in: s)
 
         // 4. Line breaks and horizontal rules.
         s = s.replacingOccurrences(of: #"<br\s*/?>"#, with: "\n",
@@ -674,6 +673,57 @@ final class MarkdownAwareTextView: NSTextView {
     /// Strip `<tag … >…</tag>` blocks entirely.
     private static func removeBlock(in input: String, tag: String) -> String {
         replaceTag(in: input, tag: tag) { _ in "" }
+    }
+
+    /// Replace every `<a href="…">…</a>` (or single-quoted href) with a
+    /// markdown link, trimming/collapsing whitespace inside the inner
+    /// text. CommonMark refuses to parse `[text](url)` if the bracketed
+    /// label contains a newline, so a multi-line button HTML wrapper
+    /// would otherwise emit `[\n  Label →\n](url)` and the brackets
+    /// would stay visible verbatim.
+    private static func replaceAnchors(in input: String) -> String {
+        let pattern = #"<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)</a\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        else { return input }
+        let ns = input as NSString
+        var result = ""
+        var cursor = 0
+        regex.enumerateMatches(in: input, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let m = match, m.numberOfRanges >= 4 else { return }
+            let outer = m.range
+            let dq = m.range(at: 1)
+            let sq = m.range(at: 2)
+            let inner = m.range(at: 3)
+            let urlRange = dq.location != NSNotFound ? dq : sq
+            guard urlRange.location != NSNotFound else { return }
+
+            if outer.location > cursor {
+                result += ns.substring(with: NSRange(location: cursor, length: outer.location - cursor))
+            }
+
+            let url = ns.substring(with: urlRange)
+            let cleaned = cleanInlineText(ns.substring(with: inner))
+            if cleaned.isEmpty {
+                // Empty label → emit the bare URL so the user still sees
+                // something rather than a phantom `[](url)` link.
+                result += url
+            } else {
+                result += "[\(cleaned)](\(url))"
+            }
+            cursor = outer.location + outer.length
+        }
+        if cursor < ns.length {
+            result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+        }
+        return result
+    }
+
+    /// Strip nested tags and collapse whitespace runs into a single
+    /// space, so the output is safe to embed in CommonMark `[…]`.
+    private static func cleanInlineText(_ s: String) -> String {
+        var out = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Convert an attributed string (from HTML/RTF) into a markdown

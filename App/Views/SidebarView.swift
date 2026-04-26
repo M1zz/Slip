@@ -101,18 +101,17 @@ struct SidebarView: View {
     private func rowView(for node: FileTreeNode) -> some View {
         switch node.kind {
         case .folder(let name, let path):
-            FolderRow(name: name)
-                .contextMenu {
-                    Button("New Note Here") {
-                        Task { @MainActor in appState.createNewNote(in: path) }
-                    }
-                    Button("New Subfolder…") {
-                        newFolderPrompt = NewFolderPrompt(parent: path)
-                    }
+            FolderDropZone(name: name) { providers in
+                handleDrop(providers: providers, into: path)
+            }
+            .contextMenu {
+                Button("New Note Here") {
+                    Task { @MainActor in appState.createNewNote(in: path) }
                 }
-                .onDrop(of: [.utf8PlainText], isTargeted: nil) { providers in
-                    handleDrop(providers: providers, into: path)
+                Button("New Subfolder…") {
+                    newFolderPrompt = NewFolderPrompt(parent: path)
                 }
+            }
         case .note(let id, let title):
             NoteRow(id: id, title: title)
                 .tag(id)
@@ -135,6 +134,8 @@ struct SidebarView: View {
                 }
                 .onDrag {
                     NSItemProvider(object: id.relativePath as NSString)
+                } preview: {
+                    NoteDragPreview(title: title)
                 }
         }
     }
@@ -324,6 +325,53 @@ private struct FolderRow: View {
                 .fontWeight(.medium)
                 .lineLimit(1)
         }
+    }
+}
+
+/// FolderRow that highlights itself when a note is being dragged over it,
+/// so the drop target is unambiguous before the user releases the mouse.
+private struct FolderDropZone: View {
+    let name: String
+    let onDrop: ([NSItemProvider]) -> Bool
+    @State private var isTargeted: Bool = false
+
+    var body: some View {
+        FolderRow(name: name)
+            .padding(.vertical, 2)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isTargeted ? Color.accentColor.opacity(0.20) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(isTargeted ? Color.accentColor : .clear, lineWidth: 1)
+                    )
+            )
+            .animation(.easeOut(duration: 0.12), value: isTargeted)
+            .onDrop(of: [.utf8PlainText], isTargeted: $isTargeted) { providers in
+                onDrop(providers)
+            }
+    }
+}
+
+/// Floating preview the user sees attached to the cursor during a note
+/// drag. Mirrors the sidebar row chrome but with a card background so it
+/// reads as detached from the list.
+private struct NoteDragPreview: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            Text(title)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
     }
 }
 

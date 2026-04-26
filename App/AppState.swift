@@ -497,11 +497,27 @@ final class AppState: ObservableObject {
             NSLog("[Slip] moved \(oldURL.path) → \(candidate.path)")
             markInternalWrite(url: oldURL)
             markInternalWrite(url: candidate)
-            reindexIncrementally([oldURL, candidate])
-            // Repoint currentNoteID if the moved note was the one being edited.
-            if currentNoteID == id, let newID = try? vault.noteID(for: candidate) {
-                self.currentNoteID = newID
+
+            // Optimistic UI update: rewrite the in-memory note list with
+            // the new path so the sidebar tree flips immediately. Without
+            // this, the user would see the note in the old folder until
+            // the background reindex (Task.detached → DB write →
+            // refreshAfterIndex) finished, which is what gave the
+            // appearance of "two places at once".
+            if let newID = try? vault.noteID(for: candidate) {
+                if let idx = allNoteIDs.firstIndex(of: id) {
+                    allNoteIDs[idx] = newID
+                }
+                if let title = titleByID.removeValue(forKey: id) {
+                    titleByID[newID] = title
+                }
+                if currentNoteID == id {
+                    self.currentNoteID = newID
+                }
+                applyTagFilter()
             }
+
+            reindexIncrementally([oldURL, candidate])
         } catch {
             NSLog("[Slip] Move failed (\(oldURL.path) → \(parentURL.path)): \(error)")
         }

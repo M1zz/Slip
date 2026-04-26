@@ -309,7 +309,13 @@ private struct NoteRow: View {
                 .font(.caption)
             Text(title)
                 .lineLimit(1)
+            Spacer(minLength: 0)
         }
+        // Stretch the row to the full sidebar width and make the entire
+        // rectangle hit-testable, so clicking the empty area next to the
+        // title still selects the note.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
@@ -324,7 +330,10 @@ private struct FolderRow: View {
             Text(name)
                 .fontWeight(.medium)
                 .lineLimit(1)
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

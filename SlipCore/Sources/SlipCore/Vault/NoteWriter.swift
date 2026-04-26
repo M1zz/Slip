@@ -58,7 +58,7 @@ public final class NoteWriter {
 
     // MARK: - Filename hygiene
 
-    private static func safeFilename(from title: String) -> String {
+    public static func safeFilename(from title: String) -> String {
         let disallowed = CharacterSet(charactersIn: "/\\?%*|\"<>:")
         let cleaned = title.components(separatedBy: disallowed).joined(separator: "-")
         let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)

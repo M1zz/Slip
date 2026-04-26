@@ -406,7 +406,14 @@ final class AppState: ObservableObject {
             NSLog("[Slip] saveCurrentNote skipped: no currentNoteID")
             return
         }
-        let url = vault.url(for: id)
+        // If the title has diverged from the on-disk filename, rename
+        // the file before writing so the .md file always matches the
+        // human title. The rename updates currentNoteID + allNoteIDs in
+        // place so the sidebar refreshes immediately, then we write to
+        // the new URL.
+        let (writeURL, writeID) = renameToMatchTitleIfNeeded(id: id, vault: vault)
+
+        let url = writeURL
         let fullContent = Self.renderNote(
             title: currentNoteTitle,
             body: currentNoteBody,
@@ -419,6 +426,54 @@ final class AppState: ObservableObject {
             reindexIncrementally([url])
         } catch {
             NSLog("[Slip] Save failed for \(url.path): \(error)")
+        }
+        _ = writeID
+    }
+
+    /// If the editor's title differs from the current filename, rename
+    /// the file (handling collisions with " 2" suffixes) and patch the
+    /// in-memory state so subsequent saves write to the new path.
+    /// Returns the URL/ID to write to (new or unchanged).
+    private func renameToMatchTitleIfNeeded(id: NoteID, vault: Vault) -> (URL, NoteID) {
+        let originalURL = vault.url(for: id)
+        let trimmedTitle = currentNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return (originalURL, id) }
+
+        let safeStem = NoteWriter.safeFilename(from: trimmedTitle)
+        let currentStem = originalURL.deletingPathExtension().lastPathComponent
+        guard currentStem != safeStem else { return (originalURL, id) }
+
+        let parentURL = originalURL.deletingLastPathComponent()
+        var targetURL = parentURL.appendingPathComponent("\(safeStem).md")
+        var n = 1
+        while FileManager.default.fileExists(atPath: targetURL.path),
+              targetURL.standardizedFileURL != originalURL.standardizedFileURL {
+            n += 1
+            targetURL = parentURL.appendingPathComponent("\(safeStem) \(n).md")
+        }
+        guard targetURL.standardizedFileURL != originalURL.standardizedFileURL else {
+            return (originalURL, id)
+        }
+        do {
+            try FileManager.default.moveItem(at: originalURL, to: targetURL)
+            NSLog("[Slip] renamed \(originalURL.lastPathComponent) → \(targetURL.lastPathComponent)")
+            markInternalWrite(url: originalURL)
+            markInternalWrite(url: targetURL)
+            guard let newID = try? vault.noteID(for: targetURL) else {
+                return (targetURL, id)
+            }
+            if let idx = allNoteIDs.firstIndex(of: id) {
+                allNoteIDs[idx] = newID
+            }
+            if let title = titleByID.removeValue(forKey: id) {
+                titleByID[newID] = title
+            }
+            currentNoteID = newID
+            applyTagFilter()
+            return (targetURL, newID)
+        } catch {
+            NSLog("[Slip] Rename on save failed: \(error)")
+            return (originalURL, id)
         }
     }
 

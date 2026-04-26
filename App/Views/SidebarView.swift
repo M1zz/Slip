@@ -113,30 +113,35 @@ struct SidebarView: View {
                 }
             }
         case .note(let id, let title):
-            NoteRow(id: id, title: title)
-                .tag(id)
-                .contextMenu {
-                    Menu("Move to") {
-                        Button("Vault Root") {
-                            Task { @MainActor in appState.moveNote(id, toFolder: "") }
-                        }
-                        if !appState.allFolders.isEmpty {
-                            Divider()
-                            ForEach(appState.allFolders, id: \.self) { folder in
-                                Button(folder) {
-                                    Task { @MainActor in
-                                        appState.moveNote(id, toFolder: folder)
-                                    }
+            Button {
+                Task { @MainActor in appState.openNote(id) }
+            } label: {
+                NoteRow(id: id, title: title)
+            }
+            .buttonStyle(.plain)
+            .tag(id)
+            .contextMenu {
+                Menu("Move to") {
+                    Button("Vault Root") {
+                        Task { @MainActor in appState.moveNote(id, toFolder: "") }
+                    }
+                    if !appState.allFolders.isEmpty {
+                        Divider()
+                        ForEach(appState.allFolders, id: \.self) { folder in
+                            Button(folder) {
+                                Task { @MainActor in
+                                    appState.moveNote(id, toFolder: folder)
                                 }
                             }
                         }
                     }
                 }
-                .onDrag {
-                    NSItemProvider(object: id.relativePath as NSString)
-                } preview: {
-                    NoteDragPreview(title: title)
-                }
+            }
+            .onDrag {
+                NSItemProvider(object: id.relativePath as NSString)
+            } preview: {
+                NoteDragPreview(title: title)
+            }
         }
     }
 
@@ -309,6 +314,10 @@ private struct NoteRow: View {
                 .font(.caption)
             Text(title)
                 .lineLimit(1)
+                // Disable text selection so the Text doesn't intercept
+                // clicks (macOS 14+ Text is selectable by default and
+                // swallows the row's tap target).
+                .textSelection(.disabled)
             Spacer(minLength: 0)
         }
         // Stretch the row to the full sidebar width and make the entire

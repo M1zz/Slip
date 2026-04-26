@@ -464,15 +464,23 @@ final class MarkdownAwareTextView: NSTextView {
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
         let types = pb.types ?? []
+        NSLog("[Slip] paste types=\(types.map(\.rawValue))")
 
         // 1. Rich text source — convert to markdown, preserving links.
-        if types.contains(.html), let html = pb.string(forType: .html),
-           insertConvertedHTML(html) {
-            return
+        if types.contains(.html), let html = pb.string(forType: .html) {
+            NSLog("[Slip] paste: HTML available, len=\(html.count)")
+            if insertConvertedHTML(html) {
+                NSLog("[Slip] paste: HTML→markdown succeeded")
+                return
+            }
+            NSLog("[Slip] paste: HTML→markdown produced empty result")
         }
-        if types.contains(.rtf), let rtfData = pb.data(forType: .rtf),
-           insertConvertedRTF(rtfData) {
-            return
+        if types.contains(.rtf), let rtfData = pb.data(forType: .rtf) {
+            NSLog("[Slip] paste: RTF available, bytes=\(rtfData.count)")
+            if insertConvertedRTF(rtfData) {
+                NSLog("[Slip] paste: RTF→markdown succeeded")
+                return
+            }
         }
 
         // 2. Pure-image paste (no text on pasteboard). NSImage pulls from
@@ -481,11 +489,13 @@ final class MarkdownAwareTextView: NSTextView {
         if !types.contains(.string), !types.contains(.html),
            let image = NSImage(pasteboard: pb) {
             if let onImagePaste, let relPath = onImagePaste(image) {
+                NSLog("[Slip] paste: image saved to \(relPath)")
                 insertText("![](\(relPath))", replacementRange: selectedRange())
                 return
             }
         }
 
+        NSLog("[Slip] paste: falling through to plain-text default")
         super.paste(sender)
     }
 
@@ -513,50 +523,82 @@ final class MarkdownAwareTextView: NSTextView {
         return true
     }
 
-    /// Walk every styled run in `attr` and emit a markdown approximation:
-    /// bold/italic via font traits, hyperlinks via the `.link` attribute.
-    /// Object replacement characters (NSAttachmentCharacter) — typically
-    /// inline images we can't fetch — are stripped so they don't show up
-    /// as garbage glyphs.
+    /// Convert an attributed string (from HTML/RTF) into a markdown
+    /// approximation. Block level: lines whose first run is in a larger
+    /// font become `# ` / `## ` / `### ` headings, paragraphs are
+    /// separated by blank lines so the markdown parser keeps them apart.
+    /// Inline level: bold/italic via font traits, links via `.link`.
+    /// Object-replacement glyphs (`\u{fffc}` from inline images we can't
+    /// fetch) are stripped.
     private static func attributedToMarkdown(_ attr: NSAttributedString) -> String {
-        var result = ""
-        let full = NSRange(location: 0, length: attr.length)
-        attr.enumerateAttributes(in: full) { attrs, range, _ in
-            let raw = (attr.string as NSString).substring(with: range)
-            var text = raw.replacingOccurrences(of: "\u{fffc}", with: "")
-            guard !text.isEmpty else { return }
+        let nsString = attr.string as NSString
+        let lines = attr.string.components(separatedBy: "\n")
+        var blocks: [String] = []
+        var lineStart = 0
 
-            // Only wrap with **/* if this run has visible text — otherwise
-            // wrappers around lone newlines/spaces produce things like
-            // `** **` that the markdown parser would render literally.
-            let nonWhitespace = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !nonWhitespace.isEmpty, let font = attrs[.font] as? NSFont {
-                let traits = font.fontDescriptor.symbolicTraits
-                let bold = traits.contains(.bold)
-                let italic = traits.contains(.italic)
-                if bold && italic {
-                    text = "***\(text)***"
-                } else if bold {
-                    text = "**\(text)**"
-                } else if italic {
-                    text = "*\(text)*"
-                }
+        for line in lines {
+            let lineLength = (line as NSString).length
+            defer { lineStart += lineLength + 1 }
+
+            if lineLength == 0 {
+                // Blank line — paragraph separator. We'll emit it via
+                // joining with "\n\n" below, so just skip here.
+                continue
             }
 
-            if let link = attrs[.link] {
-                let urlStr: String
-                if let u = link as? URL {
-                    urlStr = u.absoluteString
-                } else if let s = link as? String {
-                    urlStr = s
-                } else {
-                    urlStr = "\(link)"
-                }
-                text = "[\(text)](\(urlStr))"
+            // Detect heading by font size from the first run on the line.
+            var headingPrefix = ""
+            let firstAttrs = attr.attributes(at: lineStart, effectiveRange: nil)
+            if let font = firstAttrs[.font] as? NSFont {
+                let size = font.pointSize
+                if size >= 22 { headingPrefix = "# " }
+                else if size >= 18 { headingPrefix = "## " }
+                else if size >= 15.5 { headingPrefix = "### " }
             }
 
-            result += text
+            let lineRange = NSRange(location: lineStart, length: lineLength)
+            var lineMD = ""
+            attr.enumerateAttributes(in: lineRange) { attrs, runRange, _ in
+                let raw = nsString.substring(with: runRange)
+                var text = raw.replacingOccurrences(of: "\u{fffc}", with: "")
+                guard !text.isEmpty else { return }
+
+                // Inline emphasis — but skip on heading lines so we don't
+                // produce `# **Heading**` (most heading fonts inherit a
+                // bold trait).
+                let nonWS = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !nonWS.isEmpty, headingPrefix.isEmpty,
+                   let font = attrs[.font] as? NSFont {
+                    let traits = font.fontDescriptor.symbolicTraits
+                    let bold = traits.contains(.bold)
+                    let italic = traits.contains(.italic)
+                    if bold && italic {
+                        text = "***\(text)***"
+                    } else if bold {
+                        text = "**\(text)**"
+                    } else if italic {
+                        text = "*\(text)*"
+                    }
+                }
+
+                if let link = attrs[.link] {
+                    let urlStr: String
+                    if let u = link as? URL {
+                        urlStr = u.absoluteString
+                    } else if let s = link as? String {
+                        urlStr = s
+                    } else {
+                        urlStr = "\(link)"
+                    }
+                    text = "[\(text)](\(urlStr))"
+                }
+
+                lineMD += text
+            }
+
+            blocks.append(headingPrefix + lineMD)
         }
-        return result
+
+        return blocks.joined(separator: "\n\n")
     }
 }

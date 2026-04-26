@@ -51,6 +51,14 @@ struct NoteEditorView: View {
                         text: $appState.currentNoteBody,
                         titles: { Array(appState.titleByID.values) },
                         insertLinkRequest: appState.insertLinkRequest,
+                        onImagePaste: { image in
+                            // NSTextView.paste runs on the main thread, so
+                            // we can hop straight into the @MainActor-bound
+                            // AppState helper without an await.
+                            MainActor.assumeIsolated {
+                                appState.savePastedImage(image)
+                            }
+                        },
                         onWikilinkClick: { target in
                             openTargetByTitle(target)
                         }

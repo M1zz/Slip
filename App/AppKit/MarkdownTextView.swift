@@ -32,13 +32,29 @@ struct MarkdownTextView: NSViewRepresentable {
     /// at the current cursor position, which kicks off the wikilink
     /// autocomplete popover. Driven by the toolbar "link" button / ⌘K.
     var insertLinkRequest: Int = 0
+    /// Save an NSImage to the vault and return the relative markdown path
+    /// (e.g. `_attachments/paste-...png`) — invoked when the user pastes an
+    /// image. Returning nil falls back to plain-text paste.
+    var onImagePaste: ((NSImage) -> String?)? = nil
     var onWikilinkClick: (String) -> Void = { _ in }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else {
-            return scrollView
-        }
+        // Build the scroll view + text view manually so we can substitute
+        // our paste-aware NSTextView subclass.
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = MarkdownAwareTextView()
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
 
         textView.delegate = context.coordinator
         textView.isRichText = false
@@ -58,6 +74,10 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.backgroundColor = .textBackgroundColor
         textView.drawsBackground = true
 
+        textView.onImagePaste = onImagePaste
+
+        scrollView.documentView = textView
+
         context.coordinator.textView = textView
         textView.string = text
         context.coordinator.reapplyHighlighting()
@@ -65,7 +85,10 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard let textView = scrollView.documentView as? MarkdownAwareTextView else { return }
+        // Keep the paste callback in sync — closures captured at make time
+        // get stale once SwiftUI re-renders with new dependencies.
+        textView.onImagePaste = onImagePaste
         // Only replace if the external binding diverged (e.g., switching notes).
         if textView.string != text {
             textView.string = text
@@ -420,5 +443,120 @@ enum Theme {
         let sizes: [CGFloat] = [28, 24, 20, 18, 16, 15]
         let size = sizes[min(max(level, 1), 6) - 1]
         return NSFont.systemFont(ofSize: size, weight: .semibold)
+    }
+}
+
+// MARK: - Paste-aware NSTextView
+
+/// NSTextView subclass that intercepts paste so we can:
+/// 1. Convert HTML/RTF rich text (Notion, web pages, Substack, …) to
+///    inline markdown so links, bold and italic survive instead of
+///    being stripped to plain text by the default `isRichText = false`
+///    behavior.
+/// 2. Detect a pure-image paste (screenshot, "Copy Image" from a web
+///    page) and route it through `onImagePaste`, which is expected to
+///    save the image into the vault and return a relative path for an
+///    `![](_attachments/…)` markdown reference.
+final class MarkdownAwareTextView: NSTextView {
+
+    var onImagePaste: ((NSImage) -> String?)?
+
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        let types = pb.types ?? []
+
+        // 1. Rich text source — convert to markdown, preserving links.
+        if types.contains(.html), let html = pb.string(forType: .html),
+           insertConvertedHTML(html) {
+            return
+        }
+        if types.contains(.rtf), let rtfData = pb.data(forType: .rtf),
+           insertConvertedRTF(rtfData) {
+            return
+        }
+
+        // 2. Pure-image paste (no text on pasteboard). NSImage pulls from
+        //    PNG/TIFF/PDF/etc. so screenshots and web-page "Copy Image"
+        //    both work.
+        if !types.contains(.string), !types.contains(.html),
+           let image = NSImage(pasteboard: pb) {
+            if let onImagePaste, let relPath = onImagePaste(image) {
+                insertText("![](\(relPath))", replacementRange: selectedRange())
+                return
+            }
+        }
+
+        super.paste(sender)
+    }
+
+    private func insertConvertedHTML(_ html: String) -> Bool {
+        guard let data = html.data(using: .utf8) else { return false }
+        return insertConverted(htmlOrRTF: data, type: .html)
+    }
+
+    private func insertConvertedRTF(_ rtf: Data) -> Bool {
+        return insertConverted(htmlOrRTF: rtf, type: .rtf)
+    }
+
+    private func insertConverted(htmlOrRTF data: Data,
+                                 type: NSAttributedString.DocumentType) -> Bool {
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: type,
+            .characterEncoding: String.Encoding.utf8.rawValue
+        ]
+        guard let attr = try? NSAttributedString(data: data, options: options, documentAttributes: nil)
+        else { return false }
+        let markdown = Self.attributedToMarkdown(attr)
+        let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        insertText(markdown, replacementRange: selectedRange())
+        return true
+    }
+
+    /// Walk every styled run in `attr` and emit a markdown approximation:
+    /// bold/italic via font traits, hyperlinks via the `.link` attribute.
+    /// Object replacement characters (NSAttachmentCharacter) — typically
+    /// inline images we can't fetch — are stripped so they don't show up
+    /// as garbage glyphs.
+    private static func attributedToMarkdown(_ attr: NSAttributedString) -> String {
+        var result = ""
+        let full = NSRange(location: 0, length: attr.length)
+        attr.enumerateAttributes(in: full) { attrs, range, _ in
+            let raw = (attr.string as NSString).substring(with: range)
+            var text = raw.replacingOccurrences(of: "\u{fffc}", with: "")
+            guard !text.isEmpty else { return }
+
+            // Only wrap with **/* if this run has visible text — otherwise
+            // wrappers around lone newlines/spaces produce things like
+            // `** **` that the markdown parser would render literally.
+            let nonWhitespace = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !nonWhitespace.isEmpty, let font = attrs[.font] as? NSFont {
+                let traits = font.fontDescriptor.symbolicTraits
+                let bold = traits.contains(.bold)
+                let italic = traits.contains(.italic)
+                if bold && italic {
+                    text = "***\(text)***"
+                } else if bold {
+                    text = "**\(text)**"
+                } else if italic {
+                    text = "*\(text)*"
+                }
+            }
+
+            if let link = attrs[.link] {
+                let urlStr: String
+                if let u = link as? URL {
+                    urlStr = u.absoluteString
+                } else if let s = link as? String {
+                    urlStr = s
+                } else {
+                    urlStr = "\(link)"
+                }
+                text = "[\(text)](\(urlStr))"
+            }
+
+            result += text
+        }
+        return result
     }
 }

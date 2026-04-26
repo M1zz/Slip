@@ -233,6 +233,43 @@ final class AppState: ObservableObject {
         insertLinkRequest &+= 1
     }
 
+    /// Save a pasted/dragged image into the vault's `_attachments/` folder
+    /// and return the relative markdown path for embedding. Returns nil
+    /// if there's no vault, the image can't be encoded, or the write
+    /// fails.
+    func savePastedImage(_ image: NSImage) -> String? {
+        guard let vault else { return nil }
+        let attachmentsURL = vault.root.appendingPathComponent("_attachments", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: attachmentsURL, withIntermediateDirectories: true)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            let stamp = formatter.string(from: Date())
+            // Random-ish suffix so multiple pastes within the same second
+            // don't collide.
+            let suffix = String(Int.random(in: 1000...9999))
+            let filename = "paste-\(stamp)-\(suffix).png"
+            let imageURL = attachmentsURL.appendingPathComponent(filename)
+            guard let pngData = Self.pngData(from: image) else {
+                NSLog("[Slip] savePastedImage: could not encode PNG")
+                return nil
+            }
+            try pngData.write(to: imageURL)
+            NSLog("[Slip] saved pasted image to \(imageURL.path)")
+            markInternalWrite(url: imageURL)
+            return "_attachments/\(filename)"
+        } catch {
+            NSLog("[Slip] savePastedImage failed: \(error)")
+            return nil
+        }
+    }
+
+    private static func pngData(from image: NSImage) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
     struct ParsedNote {
         let title: String
         let body: String

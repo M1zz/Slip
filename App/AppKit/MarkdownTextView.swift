@@ -500,27 +500,172 @@ final class MarkdownAwareTextView: NSTextView {
     }
 
     private func insertConvertedHTML(_ html: String) -> Bool {
-        guard let data = html.data(using: .utf8) else { return false }
-        return insertConverted(htmlOrRTF: data, type: .html)
+        // Regex-based pass first — most reliable for the structural tags we
+        // care about (links, headings, bold, italic, lists). Chrome /
+        // Substack frequently style bold via `font-weight: 600` instead of
+        // `<strong>`, which NSAttributedString doesn't always promote to
+        // the `.bold` symbolic trait, so the previous attribute-walk
+        // produced unstyled prose.
+        let markdown = Self.convertHTMLToMarkdown(html)
+        let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        NSLog("[Slip] paste: HTML→markdown preview: \(String(trimmed.prefix(200)))…")
+        insertText(markdown, replacementRange: selectedRange())
+        return true
     }
 
     private func insertConvertedRTF(_ rtf: Data) -> Bool {
-        return insertConverted(htmlOrRTF: rtf, type: .rtf)
-    }
-
-    private func insertConverted(htmlOrRTF data: Data,
-                                 type: NSAttributedString.DocumentType) -> Bool {
         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: type,
+            .documentType: NSAttributedString.DocumentType.rtf,
             .characterEncoding: String.Encoding.utf8.rawValue
         ]
-        guard let attr = try? NSAttributedString(data: data, options: options, documentAttributes: nil)
+        guard let attr = try? NSAttributedString(data: rtf, options: options, documentAttributes: nil)
         else { return false }
         let markdown = Self.attributedToMarkdown(attr)
         let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         insertText(markdown, replacementRange: selectedRange())
         return true
+    }
+
+    /// Lightweight HTML → Markdown converter. Intentionally simple (regex,
+    /// no DOM parsing), so it can't handle deeply nested malformed markup,
+    /// but it gets the common structural cases right where
+    /// NSAttributedString's font-trait inference fails on CSS-styled
+    /// content from Chrome/Notion/Substack.
+    private static func convertHTMLToMarkdown(_ raw: String) -> String {
+        var s = raw
+
+        // 0. Drop everything inside <head> / <script> / <style> blocks —
+        //    Chrome's HTML pasteboard often includes a full <html><head>…
+        //    block of meta/style tags we don't want to text-leak.
+        s = removeBlock(in: s, tag: "head")
+        s = removeBlock(in: s, tag: "script")
+        s = removeBlock(in: s, tag: "style")
+        s = removeBlock(in: s, tag: "title")
+
+        // 1. Block-level elements that affect paragraph layout. These get
+        //    wrapped in `\n\n` so markdown sees real paragraph breaks.
+        for level in (1...6).reversed() {
+            let prefix = String(repeating: "#", count: level) + " "
+            s = replaceTag(in: s, tag: "h\(level)") { content in
+                "\n\n\(prefix)\(content.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
+            }
+        }
+        s = replaceTag(in: s, tag: "blockquote") { content in
+            "\n\n> " + content
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: "\n> ")
+            + "\n\n"
+        }
+        s = replaceTag(in: s, tag: "li") { content in
+            "- \(content.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        }
+        s = replaceTag(in: s, tag: "p") { content in "\n\n\(content)\n\n" }
+        s = replaceTag(in: s, tag: "div") { content in "\n\(content)\n" }
+
+        // 2. Inline emphasis. Order matters: bold/italic before links so
+        //    nested emphasis inside an `<a>` survives.
+        s = replaceTag(in: s, tag: "strong") { "**\($0)**" }
+        s = replaceTag(in: s, tag: "b") { "**\($0)**" }
+        s = replaceTag(in: s, tag: "em") { "*\($0)*" }
+        s = replaceTag(in: s, tag: "i") { "*\($0)*" }
+        s = replaceTag(in: s, tag: "code") { "`\($0)`" }
+
+        // 3. Links: capture href and inner text together.
+        s = s.replacingOccurrences(
+            of: #"<a\b[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)</a>"#,
+            with: "[$2]($1)",
+            options: .regularExpression
+        )
+        s = s.replacingOccurrences(
+            of: #"<a\b[^>]*href\s*=\s*'([^']*)'[^>]*>([\s\S]*?)</a>"#,
+            with: "[$2]($1)",
+            options: .regularExpression
+        )
+
+        // 4. Line breaks and horizontal rules.
+        s = s.replacingOccurrences(of: #"<br\s*/?>"#, with: "\n",
+                                   options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<hr\s*/?>"#, with: "\n\n---\n\n",
+                                   options: [.regularExpression, .caseInsensitive])
+
+        // 5. Strip every remaining tag.
+        s = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+
+        // 6. Decode the most common HTML entities.
+        let entities: [(String, String)] = [
+            ("&nbsp;", " "),
+            ("&amp;", "&"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&quot;", "\""),
+            ("&apos;", "'"),
+            ("&#39;", "'"),
+            ("&rsquo;", "’"),
+            ("&lsquo;", "‘"),
+            ("&rdquo;", "”"),
+            ("&ldquo;", "“"),
+            ("&hellip;", "…"),
+            ("&mdash;", "—"),
+            ("&ndash;", "–"),
+            ("&#8217;", "’"),
+            ("&#8216;", "‘"),
+            ("&#8220;", "“"),
+            ("&#8221;", "”"),
+        ]
+        for (entity, replacement) in entities {
+            s = s.replacingOccurrences(of: entity, with: replacement)
+        }
+        // Numeric entities &#nnn;
+        s = s.replacingOccurrences(
+            of: #"&#(\d+);"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        // 7. Collapse runs of blank lines down to a single empty line so
+        //    we don't end up with a wall of vertical whitespace.
+        s = s.replacingOccurrences(
+            of: #"\n[ \t]*\n[ \t]*\n+"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
+
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Replace every `<tag …>…</tag>` pair with the result of `transform`
+    /// applied to the captured inner text. `[\s\S]*?` is the dotall-safe
+    /// equivalent of `.*?` so we match across line breaks.
+    private static func replaceTag(in input: String, tag: String,
+                                   transform: (String) -> String) -> String {
+        let pattern = #"<\#(tag)\b[^>]*>([\s\S]*?)</\#(tag)\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        else { return input }
+        let ns = input as NSString
+        var result = ""
+        var cursor = 0
+        regex.enumerateMatches(in: input, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let m = match, m.numberOfRanges >= 2 else { return }
+            let outer = m.range
+            let inner = m.range(at: 1)
+            if outer.location > cursor {
+                result += ns.substring(with: NSRange(location: cursor, length: outer.location - cursor))
+            }
+            let innerText = ns.substring(with: inner)
+            result += transform(innerText)
+            cursor = outer.location + outer.length
+        }
+        if cursor < ns.length {
+            result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+        }
+        return result
+    }
+
+    /// Strip `<tag … >…</tag>` blocks entirely.
+    private static func removeBlock(in input: String, tag: String) -> String {
+        replaceTag(in: input, tag: tag) { _ in "" }
     }
 
     /// Convert an attributed string (from HTML/RTF) into a markdown

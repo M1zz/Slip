@@ -373,11 +373,19 @@ struct MarkdownTextView: NSViewRepresentable {
                 .backgroundColor: NSColor.textBackgroundColor.blended(withFraction: 0.06, of: .labelColor) ?? .clear
             ], range: range)
 
-        case .link(let r, _):
+        case .link(let r, let destination):
             guard let range = nsRange(r) else { return }
-            storage.addAttributes([
+            var attrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: NSColor.linkColor
-            ], range: range)
+            ]
+            if let dest = destination, !dest.isEmpty {
+                // Attach the destination so the text view's
+                // clickedOnLink: delegate routes the click to NSWorkspace
+                // (which opens it in the default browser).
+                attrs[.link] = dest
+                attrs[.cursor] = NSCursor.pointingHand
+            }
+            storage.addAttributes(attrs, range: range)
 
         case .blockquote(let r):
             guard let range = nsRange(r) else { return }

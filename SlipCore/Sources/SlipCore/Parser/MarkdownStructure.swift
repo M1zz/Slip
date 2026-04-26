@@ -234,20 +234,18 @@ private struct SpanCollector: MarkupWalker {
     mutating func visitLink(_ link: Link) {
         if let r = range(for: link) {
             spans.append(.link(range: r, destination: link.destination))
-            // Link syntax: `[text](url)`. Mark the `[`, `](url)` delimiters.
+            // Link syntax: `[text](url)`. Hide the leading `[` and the
+            // entire `](url)` tail so only the visible label remains. The
+            // previous behavior left the URL itself uncovered, so users
+            // saw `text https://example.com` smushed together.
             let ns = source as NSString
             if r.lowerBound < ns.length, ns.character(at: r.lowerBound) == 0x5B { // '['
                 syntaxMarkers.append(r.lowerBound..<(r.lowerBound + 1))
             }
-            // Find the `](` pair. Scan within r for "](".
             let search = NSRange(location: r.lowerBound, length: r.upperBound - r.lowerBound)
             let middle = ns.range(of: "](", range: search)
             if middle.location != NSNotFound {
-                syntaxMarkers.append(middle.location..<(middle.location + 2))
-            }
-            if r.upperBound > 0, r.upperBound <= ns.length,
-               ns.character(at: r.upperBound - 1) == 0x29 { // ')'
-                syntaxMarkers.append((r.upperBound - 1)..<r.upperBound)
+                syntaxMarkers.append(middle.location..<r.upperBound)
             }
         }
         descendInto(link)

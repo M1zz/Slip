@@ -55,8 +55,15 @@ public struct NoteID: Hashable, Sendable, Codable, CustomStringConvertible {
     public let relativePath: String
 
     public init(relativePath: String) {
-        // Normalize separators — we store POSIX-style for cross-platform stability.
-        self.relativePath = relativePath.replacingOccurrences(of: "\\", with: "/")
+        // Normalize separators — we store POSIX-style for cross-platform
+        // stability. Also force NFC composition so paths derived from URLs
+        // (often NFC on APFS) match paths read from FileManager
+        // enumerators (sometimes NFD on HFS+/network), which would
+        // otherwise cause SQLite WHERE id = ? lookups to silently miss
+        // and leave stale rows behind after rename/move.
+        self.relativePath = relativePath
+            .replacingOccurrences(of: "\\", with: "/")
+            .precomposedStringWithCanonicalMapping
     }
 
     public var description: String { relativePath }

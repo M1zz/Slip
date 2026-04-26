@@ -535,6 +535,11 @@ final class AppState: ObservableObject {
         guard let indexer else { return }
         Task.detached { [weak self] in
             try? indexer.reindex(urls: urls)
+            // Sweep stale DB rows whose files no longer exist (e.g., after
+            // a rename/move that the per-URL delete didn't catch due to
+            // path-normalization mismatches). Cheap on small vaults and
+            // keeps the sidebar from showing duplicate entries.
+            try? indexer.garbageCollect()
             await self?.refreshAfterIndex()
         }
     }

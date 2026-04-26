@@ -24,6 +24,11 @@ final class AppState: ObservableObject {
     /// for export and so other markdown editors (Obsidian, iA Writer)
     /// recognize them.
     @Published var currentNoteTags: [String] = []
+    /// Frontmatter lines we don't manage (description, canonical_url,
+    /// published, cover_image, series, …). Round-tripped verbatim on
+    /// save so importing a Dev.to / Hugo / Jekyll post and re-saving
+    /// doesn't drop the publish metadata.
+    @Published var currentNoteExtraFrontmatter: String = ""
     /// Incremented by the toolbar/⌘K handler to ask the active editor to
     /// insert `[[` at the cursor (which triggers the existing wikilink
     /// autocomplete). MarkdownTextView observes this counter.
@@ -219,6 +224,7 @@ final class AppState: ObservableObject {
         self.currentNoteTitle = parsed.title
         self.currentNoteBody = parsed.body
         self.currentNoteTags = parsed.tags
+        self.currentNoteExtraFrontmatter = parsed.extraFrontmatter
         self.backlinks = (try? index.backlinks(to: id)) ?? []
         try? index.recordView(id: id)
     }
@@ -231,6 +237,7 @@ final class AppState: ObservableObject {
         let title: String
         let body: String
         let tags: [String]
+        let extraFrontmatter: String
     }
 
     /// Parse the full `.md` content into editable parts: optional YAML
@@ -244,31 +251,132 @@ final class AppState: ObservableObject {
     static func parseNote(_ fullContent: String) -> ParsedNote {
         var content = fullContent
         var fmTags: [String] = []
+        var fmTitle = ""
+        var extra = ""
 
         if content.hasPrefix("---\n") {
             let afterOpen = content.index(content.startIndex, offsetBy: 4)
-            if let close = content.range(of: "\n---\n", range: afterOpen..<content.endIndex) {
+            let closeRange =
+                content.range(of: "\n---\n", range: afterOpen..<content.endIndex)
+                ?? content.range(of: "\n---\r\n", range: afterOpen..<content.endIndex)
+            if let close = closeRange {
                 let fmText = String(content[afterOpen..<close.lowerBound])
-                fmTags = parseTagsFromYAML(fmText)
-                content = String(content[close.upperBound...])
-            } else if let close = content.range(of: "\n---\r\n", range: afterOpen..<content.endIndex) {
-                let fmText = String(content[afterOpen..<close.lowerBound])
-                fmTags = parseTagsFromYAML(fmText)
+                let parsed = parseFrontmatter(fmText)
+                fmTitle = parsed.title
+                fmTags = parsed.tags
+                extra = parsed.extra
                 content = String(content[close.upperBound...])
             }
         }
 
-        let (title, rawBody) = splitTitleAndBody(content)
-        let (cleanBody, inlineTags) = extractInlineTagsFromBody(rawBody)
+        // Title resolution: frontmatter `title:` wins over a body H1.
+        // If the body still has a matching `# Title` line at top, strip
+        // it so we don't show the title twice.
+        let bodyTitle: String
+        let bodyAfterTitle: String
+        if !fmTitle.isEmpty {
+            bodyTitle = fmTitle
+            bodyAfterTitle = stripMatchingH1(from: content, matching: fmTitle)
+        } else {
+            let (extracted, rest) = splitTitleAndBody(content)
+            bodyTitle = extracted
+            bodyAfterTitle = rest
+        }
 
-        // Merge frontmatter + inline tags, dedup, frontmatter first.
+        let (cleanBody, inlineTags) = extractInlineTagsFromBody(bodyAfterTitle)
+
         var seen = Set<String>()
         var ordered: [String] = []
         for t in fmTags + inlineTags where !seen.contains(t) {
             seen.insert(t)
             ordered.append(t)
         }
-        return ParsedNote(title: title, body: cleanBody, tags: ordered)
+        return ParsedNote(title: bodyTitle, body: cleanBody, tags: ordered, extraFrontmatter: extra)
+    }
+
+    /// Walk every line in a frontmatter block, separating the keys we
+    /// manage (title, tags) from everything else. The "everything else"
+    /// is preserved verbatim so importing a Dev.to/Hugo/Jekyll post and
+    /// re-saving doesn't lose canonical_url, description, etc.
+    static func parseFrontmatter(_ fm: String) -> (title: String, tags: [String], extra: String) {
+        let lines = fm.components(separatedBy: "\n")
+        var title = ""
+        var tags: [String] = []
+        var extraLines: [String] = []
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let lowered = trimmed.lowercased()
+
+            if lowered.hasPrefix("title:") {
+                title = String(trimmed.dropFirst("title:".count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                i += 1
+                continue
+            }
+            if lowered.hasPrefix("tags:") {
+                let value = trimmed.dropFirst("tags:".count).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty {
+                    if value.hasPrefix("[") && value.hasSuffix("]") {
+                        tags = parseCSVValue(String(value.dropFirst().dropLast()))
+                    } else {
+                        // Bare comma-separated form (Dev.to: `tags: a, b, c`)
+                        // or a single-tag form (`tags: foo`).
+                        tags = parseCSVValue(value)
+                    }
+                    i += 1
+                    continue
+                }
+                // Block form on subsequent indented `- item` lines.
+                i += 1
+                while i < lines.count {
+                    let sub = lines[i].trimmingCharacters(in: .whitespaces)
+                    if sub.hasPrefix("- ") {
+                        let item = String(sub.dropFirst(2))
+                            .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                        if !item.isEmpty { tags.append(item) }
+                        i += 1
+                    } else {
+                        break
+                    }
+                }
+                continue
+            }
+            extraLines.append(line)
+            i += 1
+        }
+
+        let extra = extraLines.joined(separator: "\n").trimmingCharacters(in: .newlines)
+        return (title, tags, extra)
+    }
+
+    private static func parseCSVValue(_ s: String) -> [String] {
+        s.split(separator: ",")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Drop a leading `# Title` line + one blank line if it matches the
+    /// expected title (case-insensitive). Otherwise return content
+    /// unchanged. Used when the frontmatter already supplied a title and
+    /// the body redundantly repeats it as an H1.
+    private static func stripMatchingH1(from content: String, matching expectedTitle: String) -> String {
+        let lines = content.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+            i += 1
+        }
+        guard i < lines.count else { return content }
+        let firstTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
+        guard firstTrimmed.hasPrefix("# ") else { return content }
+        let h1 = String(firstTrimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        guard h1.lowercased() == expectedTitle.lowercased() else { return content }
+        var after = i + 1
+        if after < lines.count, lines[after].trimmingCharacters(in: .whitespaces).isEmpty {
+            after += 1
+        }
+        return after >= lines.count ? "" : lines[after...].joined(separator: "\n")
     }
 
     /// Pull every `#tag` reference out of `body` and return both the
@@ -300,50 +408,27 @@ final class AppState: ObservableObject {
         return (result as String, tagsInOrder)
     }
 
-    /// Render the editor state back to a markdown file. Tags are emitted as
-    /// a YAML frontmatter array if non-empty; otherwise the file has no
-    /// frontmatter block at all.
-    static func renderNote(title: String, body: String, tags: [String]) -> String {
+    /// Render the editor state back to a markdown file. Emits a YAML
+    /// frontmatter block whenever there are tags or preserved extra
+    /// frontmatter; otherwise no frontmatter is written. The title is
+    /// always emitted as a body H1 (so plain-markdown viewers still
+    /// see the heading).
+    static func renderNote(title: String, body: String, tags: [String], extraFrontmatter: String = "") -> String {
         let cleanTags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let trimmedExtra = extraFrontmatter.trimmingCharacters(in: .newlines)
         let core = combineTitleAndBody(title: title, body: body)
-        guard !cleanTags.isEmpty else { return core }
-        let tagsLine = cleanTags.joined(separator: ", ")
-        return "---\ntags: [\(tagsLine)]\n---\n\(core)"
-    }
 
-    /// Pulls the `tags:` line out of a YAML frontmatter block. Supports the
-    /// inline list form (`tags: [a, b]`) we always emit, and the block form
-    /// (`tags:\n  - a\n  - b`) that other editors sometimes produce.
-    static func parseTagsFromYAML(_ fm: String) -> [String] {
-        let lines = fm.components(separatedBy: "\n")
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.lowercased().hasPrefix("tags:") else { continue }
-            let value = trimmed.dropFirst("tags:".count).trimmingCharacters(in: .whitespaces)
-            if value.hasPrefix("[") && value.hasSuffix("]") {
-                let inside = value.dropFirst().dropLast()
-                return inside
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
-                    .filter { !$0.isEmpty }
-            }
-            // Block form: subsequent lines beginning with `- `.
-            var collected: [String] = []
-            for sub in lines.dropFirst(i + 1) {
-                let s = sub.trimmingCharacters(in: .whitespaces)
-                if s.hasPrefix("- ") {
-                    let item = String(s.dropFirst(2))
-                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
-                    if !item.isEmpty { collected.append(item) }
-                } else if !s.isEmpty {
-                    break
-                }
-            }
-            return collected
+        var fmLines: [String] = []
+        if !cleanTags.isEmpty {
+            fmLines.append("tags: [\(cleanTags.joined(separator: ", "))]")
         }
-        return []
+        if !trimmedExtra.isEmpty {
+            fmLines.append(trimmedExtra)
+        }
+        guard !fmLines.isEmpty else { return core }
+        return "---\n" + fmLines.joined(separator: "\n") + "\n---\n" + core
     }
 
     /// Split a note's full `.md` content into an explicit title and the
@@ -417,7 +502,8 @@ final class AppState: ObservableObject {
         let fullContent = Self.renderNote(
             title: currentNoteTitle,
             body: currentNoteBody,
-            tags: currentNoteTags
+            tags: currentNoteTags,
+            extraFrontmatter: currentNoteExtraFrontmatter
         )
         do {
             try writer.write(fullContent, to: url)
@@ -493,6 +579,7 @@ final class AppState: ObservableObject {
             currentNoteTitle = ""
             currentNoteBody = ""
             currentNoteTags = []
+            currentNoteExtraFrontmatter = ""
             markInternalWrite(url: note.url)
             reindexIncrementally([note.url])
         } catch {

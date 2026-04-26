@@ -55,7 +55,13 @@ struct NoteEditorView: View {
                             openTargetByTitle(target)
                         }
                     )
-                    .onChange(of: appState.currentNoteBody) { _, _ in
+                    .onChange(of: appState.currentNoteBody) { _, newBody in
+                        if shouldAutoExtractFrontmatter(newBody) {
+                            extractFrontmatterFromBody(newBody)
+                            // The state mutations above will fire onChange
+                            // again; that pass won't have a frontmatter
+                            // header anymore, so we won't loop.
+                        }
                         debouncedSave()
                     }
                 }
@@ -116,6 +122,38 @@ struct NoteEditorView: View {
         autosave = Just(())
             .delay(for: .seconds(0.3), scheduler: RunLoop.main)
             .sink { _ in appState.saveCurrentNote() }
+    }
+
+    // MARK: - Frontmatter import on paste
+
+    /// Returns true when the body opens with a complete YAML frontmatter
+    /// block (e.g., a freshly-pasted Dev.to / Hugo / Jekyll post). We
+    /// require at least one `key:` line so a stray double-`---` isn't
+    /// mistaken for a heredoc.
+    private func shouldAutoExtractFrontmatter(_ body: String) -> Bool {
+        guard body.hasPrefix("---\n") else { return false }
+        let after = body.index(body.startIndex, offsetBy: 4)
+        let close = body.range(of: "\n---\n", range: after..<body.endIndex)
+            ?? body.range(of: "\n---\r\n", range: after..<body.endIndex)
+        guard let close else { return false }
+        let fmText = String(body[after..<close.lowerBound])
+        return fmText.contains(":")
+    }
+
+    private func extractFrontmatterFromBody(_ body: String) {
+        let parsed = AppState.parseNote(body)
+        if !parsed.title.isEmpty, appState.currentNoteTitle.isEmpty {
+            appState.currentNoteTitle = parsed.title
+        }
+        var seen = Set(appState.currentNoteTags)
+        for t in parsed.tags where !seen.contains(t) {
+            seen.insert(t)
+            appState.currentNoteTags.append(t)
+        }
+        if !parsed.extraFrontmatter.isEmpty {
+            appState.currentNoteExtraFrontmatter = parsed.extraFrontmatter
+        }
+        appState.currentNoteBody = parsed.body
     }
 }
 

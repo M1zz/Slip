@@ -61,12 +61,65 @@ public struct MarkdownStructure {
         var walker = SpanCollector(source: text)
         walker.visit(document)
         spans.append(contentsOf: walker.spans)
+        var syntaxMarkers = walker.syntaxMarkers
 
-        // 3. Wikilinks + tags (separate pass, also UTF-16 offsets).
+        // 3. Inline-link fallback. swift-markdown occasionally fails to
+        //    recognize `[text](url)` when the surrounding paragraph has
+        //    leading emoji or unusual punctuation. We sweep the source
+        //    one more time with a tight regex, skip anything that already
+        //    overlaps a span the main walker emitted (links, code, code
+        //    blocks, frontmatter), and synthesize the missing link span
+        //    + its `[`, `](url)` syntax markers ourselves.
+        let (extraLinks, extraMarkers) = Self.detectInlineLinks(in: text, existing: spans)
+        spans.append(contentsOf: extraLinks)
+        syntaxMarkers.append(contentsOf: extraMarkers)
+
+        // 4. Wikilinks + tags (separate pass, also UTF-16 offsets).
         self.wikilinks = WikilinkParser.references(in: text)
         self.spans = spans
-        self.syntaxMarkers = walker.syntaxMarkers
+        self.syntaxMarkers = syntaxMarkers
         self.lineStarts = walker.utf16LineStarts
+    }
+
+    private static func detectInlineLinks(in text: String, existing: [Span]) -> ([Span], [Range<Int>]) {
+        let pattern = #"\[([^\[\]\n]+?)\]\(([^()\s]+?)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return ([], [])
+        }
+        let ns = text as NSString
+        // Anything inside an existing link, code span, code block, or
+        // frontmatter shouldn't be re-styled as a link.
+        var blocked: [Range<Int>] = []
+        for span in existing {
+            switch span {
+            case .link(let r, _): blocked.append(r)
+            case .code(let r): blocked.append(r)
+            case .codeBlock(let r): blocked.append(r)
+            case .frontmatter(let r): blocked.append(r)
+            default: break
+            }
+        }
+
+        var newSpans: [Span] = []
+        var newMarkers: [Range<Int>] = []
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let m = match, m.numberOfRanges >= 3 else { return }
+            let outerNS = m.range
+            let outer = outerNS.location..<(outerNS.location + outerNS.length)
+            for b in blocked where b.lowerBound < outer.upperBound && outer.lowerBound < b.upperBound {
+                return
+            }
+            let labelNS = m.range(at: 1)
+            let urlNS = m.range(at: 2)
+            let url = ns.substring(with: urlNS)
+            newSpans.append(.link(range: outer, destination: url))
+            // `[` is the first char of the match; `](…)` runs from after
+            // the label through the closing `)` (= outer.upperBound).
+            newMarkers.append(outer.lowerBound..<(outer.lowerBound + 1))
+            let middleStart = labelNS.location + labelNS.length
+            newMarkers.append(middleStart..<outer.upperBound)
+        }
+        return (newSpans, newMarkers)
     }
 
     // MARK: - Frontmatter

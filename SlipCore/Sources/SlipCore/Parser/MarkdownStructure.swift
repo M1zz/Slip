@@ -63,16 +63,22 @@ public struct MarkdownStructure {
         spans.append(contentsOf: walker.spans)
         var syntaxMarkers = walker.syntaxMarkers
 
-        // 3. Inline-link fallback. swift-markdown occasionally fails to
-        //    recognize `[text](url)` when the surrounding paragraph has
-        //    leading emoji or unusual punctuation. We sweep the source
-        //    one more time with a tight regex, skip anything that already
-        //    overlaps a span the main walker emitted (links, code, code
-        //    blocks, frontmatter), and synthesize the missing link span
-        //    + its `[`, `](url)` syntax markers ourselves.
-        let (extraLinks, extraMarkers) = Self.detectInlineLinks(in: text, existing: spans)
-        spans.append(contentsOf: extraLinks)
-        syntaxMarkers.append(contentsOf: extraMarkers)
+        // 3. Inline-link detection. Run a regex pass directly on the
+        //    UTF-16 source so the link span ranges line up with the
+        //    text-view offsets that NSTextStorage uses. Skipped inside
+        //    code spans, code blocks, and frontmatter so we don't
+        //    accidentally re-style content there.
+        let protectedRanges: [Range<Int>] = spans.compactMap { span in
+            switch span {
+            case .code(let r): return r
+            case .codeBlock(let r): return r
+            case .frontmatter(let r): return r
+            default: return nil
+            }
+        }
+        let (linkSpans, linkMarkers) = Self.detectInlineLinks(in: text, protected: protectedRanges)
+        spans.append(contentsOf: linkSpans)
+        syntaxMarkers.append(contentsOf: linkMarkers)
 
         // 4. Wikilinks + tags (separate pass, also UTF-16 offsets).
         self.wikilinks = WikilinkParser.references(in: text)
@@ -81,40 +87,36 @@ public struct MarkdownStructure {
         self.lineStarts = walker.utf16LineStarts
     }
 
-    private static func detectInlineLinks(in text: String, existing: [Span]) -> ([Span], [Range<Int>]) {
+    /// Find every inline `[text](url)` link in the source via regex. We
+    /// use NSRegularExpression here (not swift-markdown's column data)
+    /// because cmark/swift-markdown report column positions in UTF-8
+    /// bytes, while NSTextStorage and our marker hider operate in
+    /// UTF-16 — converting between them goes wrong on any line with
+    /// emoji or non-ASCII text. The regex returns NSRange values
+    /// directly, which are UTF-16 offsets, so the spans always line up.
+    /// Skips matches that fall inside code spans, code blocks, or
+    /// frontmatter so we don't accidentally style content there.
+    private static func detectInlineLinks(in text: String, protected: [Range<Int>]) -> ([Span], [Range<Int>]) {
         let pattern = #"\[([^\[\]\n]+?)\]\(([^()\s]+?)\)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return ([], [])
         }
         let ns = text as NSString
-        // Anything inside an existing link, code span, code block, or
-        // frontmatter shouldn't be re-styled as a link.
-        var blocked: [Range<Int>] = []
-        for span in existing {
-            switch span {
-            case .link(let r, _): blocked.append(r)
-            case .code(let r): blocked.append(r)
-            case .codeBlock(let r): blocked.append(r)
-            case .frontmatter(let r): blocked.append(r)
-            default: break
-            }
-        }
-
         var newSpans: [Span] = []
         var newMarkers: [Range<Int>] = []
         regex.enumerateMatches(in: text, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
             guard let m = match, m.numberOfRanges >= 3 else { return }
             let outerNS = m.range
             let outer = outerNS.location..<(outerNS.location + outerNS.length)
-            for b in blocked where b.lowerBound < outer.upperBound && outer.lowerBound < b.upperBound {
+            for b in protected where b.lowerBound < outer.upperBound && outer.lowerBound < b.upperBound {
                 return
             }
             let labelNS = m.range(at: 1)
             let urlNS = m.range(at: 2)
             let url = ns.substring(with: urlNS)
             newSpans.append(.link(range: outer, destination: url))
-            // `[` is the first char of the match; `](…)` runs from after
-            // the label through the closing `)` (= outer.upperBound).
+            // `[` is the first char of the match; `](url)` runs from
+            // after the label through the closing `)`.
             newMarkers.append(outer.lowerBound..<(outer.lowerBound + 1))
             let middleStart = labelNS.location + labelNS.length
             newMarkers.append(middleStart..<outer.upperBound)
@@ -285,22 +287,15 @@ private struct SpanCollector: MarkupWalker {
     }
 
     mutating func visitLink(_ link: Link) {
-        if let r = range(for: link) {
-            spans.append(.link(range: r, destination: link.destination))
-            // Link syntax: `[text](url)`. Hide the leading `[` and the
-            // entire `](url)` tail so only the visible label remains. The
-            // previous behavior left the URL itself uncovered, so users
-            // saw `text https://example.com` smushed together.
-            let ns = source as NSString
-            if r.lowerBound < ns.length, ns.character(at: r.lowerBound) == 0x5B { // '['
-                syntaxMarkers.append(r.lowerBound..<(r.lowerBound + 1))
-            }
-            let search = NSRange(location: r.lowerBound, length: r.upperBound - r.lowerBound)
-            let middle = ns.range(of: "](", range: search)
-            if middle.location != NSNotFound {
-                syntaxMarkers.append(middle.location..<r.upperBound)
-            }
-        }
+        // Inline `[text](url)` links and autolinks are emitted by
+        // MarkdownStructure's regex pass, which operates directly on
+        // UTF-16 offsets. swift-markdown's source columns are UTF-8
+        // byte positions, and converting them to UTF-16 offsets gets
+        // off-by-N for any line containing emoji or other multi-byte
+        // characters — which manifested as link colour and marker
+        // hiding landing on the wrong characters. Just descend so
+        // children (Text/Strong/Emphasis nested inside the link) still
+        // get walked for their own styling.
         descendInto(link)
     }
 

@@ -7,6 +7,7 @@ struct SidebarView: View {
     @State private var notesExpanded: Bool = true
     @State private var tagsExpanded: Bool = true
     @State private var newFolderPrompt: NewFolderPrompt? = nil
+    @State private var deletePrompt: DeletePrompt? = nil
 
     private var displayed: [NoteID] {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
@@ -95,6 +96,21 @@ struct SidebarView: View {
                 appState.createFolder(name: name, in: prompt.parent)
             }
         }
+        .confirmationDialog(
+            deletePrompt.map { "Move \"\($0.title)\" to Trash?" } ?? "",
+            isPresented: Binding(
+                get: { deletePrompt != nil },
+                set: { if !$0 { deletePrompt = nil } }
+            ),
+            presenting: deletePrompt
+        ) { prompt in
+            Button("Move to Trash", role: .destructive) {
+                Task { @MainActor in appState.deleteNote(prompt.id) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("The file is moved to the system Trash and can be restored from Finder.")
+        }
     }
 
     @ViewBuilder
@@ -135,6 +151,12 @@ struct SidebarView: View {
                             }
                         }
                     }
+                }
+                Divider()
+                Button(role: .destructive) {
+                    deletePrompt = DeletePrompt(id: id, title: title)
+                } label: {
+                    Text("Move to Trash")
                 }
             }
             .onDrag {
@@ -263,6 +285,11 @@ struct FileTreeNode: Identifiable {
 private struct NewFolderPrompt: Identifiable {
     let id = UUID()
     let parent: String
+}
+
+private struct DeletePrompt: Identifiable {
+    let id: NoteID
+    let title: String
 }
 
 private struct NewFolderSheet: View {

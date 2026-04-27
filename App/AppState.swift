@@ -655,6 +655,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Move the note's file to the system Trash. Optimistically scrubs
+    /// the note from in-memory state so the sidebar reacts immediately,
+    /// then runs an incremental reindex to drop the DB row. Using
+    /// `trashItem` (rather than `removeItem`) keeps the file recoverable
+    /// from Finder for as long as the user wants.
+    func deleteNote(_ id: NoteID) {
+        guard let vault else {
+            NSLog("[Slip] deleteNote skipped: no vault")
+            return
+        }
+        let url = vault.url(for: id)
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            NSLog("[Slip] moved \(url.path) to Trash")
+            markInternalWrite(url: url)
+
+            allNoteIDs.removeAll { $0 == id }
+            titleByID.removeValue(forKey: id)
+            if currentNoteID == id {
+                currentNoteID = nil
+                currentNoteTitle = ""
+                currentNoteBody = ""
+                currentNoteTags = []
+                currentNoteExtraFrontmatter = ""
+            }
+            applyTagFilter()
+            reindexIncrementally([url])
+        } catch {
+            NSLog("[Slip] Delete failed for \(url.path): \(error)")
+        }
+    }
+
     /// Move a note to another folder. `destinationFolder` is the relative
     /// path inside the vault ("" for vault root). Filenames keep the same
     /// basename; if a collision exists we suffix " 2", " 3", etc.

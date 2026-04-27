@@ -97,7 +97,7 @@ struct SidebarView: View {
             }
         }
         .confirmationDialog(
-            deletePrompt.map { "Move \"\($0.title)\" to Trash?" } ?? "",
+            "Move to Trash",
             isPresented: Binding(
                 get: { deletePrompt != nil },
                 set: { if !$0 { deletePrompt = nil } }
@@ -105,11 +105,15 @@ struct SidebarView: View {
             presenting: deletePrompt
         ) { prompt in
             Button("Move to Trash", role: .destructive) {
-                Task { @MainActor in appState.deleteNote(prompt.id) }
+                NSLog("[Slip] dialog: deleting '\(prompt.title)' (id=\(prompt.id.relativePath))")
+                appState.deleteNote(prompt.id)
+                deletePrompt = nil
             }
-            Button("Cancel", role: .cancel) { }
-        } message: { _ in
-            Text("The file is moved to the system Trash and can be restored from Finder.")
+            Button("Cancel", role: .cancel) {
+                deletePrompt = nil
+            }
+        } message: { prompt in
+            Text("Move \"\(prompt.title)\" to the system Trash? It can be restored from Finder.")
         }
     }
 
@@ -154,6 +158,7 @@ struct SidebarView: View {
                 }
                 Divider()
                 Button(role: .destructive) {
+                    NSLog("[Slip] context menu: requesting delete of '\(title)' (id=\(id.relativePath))")
                     deletePrompt = DeletePrompt(id: id, title: title)
                 } label: {
                     Text("Move to Trash")

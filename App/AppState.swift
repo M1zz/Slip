@@ -659,32 +659,58 @@ final class AppState: ObservableObject {
     /// the note from in-memory state so the sidebar reacts immediately,
     /// then runs an incremental reindex to drop the DB row. Using
     /// `trashItem` (rather than `removeItem`) keeps the file recoverable
-    /// from Finder for as long as the user wants.
+    /// from Finder for as long as the user wants. Falls back to
+    /// `removeItem` if Trash isn't available (e.g., the vault is on a
+    /// volume without a Trash) so the user isn't left with a phantom
+    /// file in the sidebar.
     func deleteNote(_ id: NoteID) {
+        NSLog("[Slip] deleteNote called for id='\(id.relativePath)'")
         guard let vault else {
             NSLog("[Slip] deleteNote skipped: no vault")
             return
         }
         let url = vault.url(for: id)
-        do {
-            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-            NSLog("[Slip] moved \(url.path) to Trash")
-            markInternalWrite(url: url)
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        NSLog("[Slip] deleteNote: target \(url.path) exists=\(exists)")
+        // Mark before the actual move so the FSEvent echo is suppressed
+        // even if it fires before our reindex starts.
+        markInternalWrite(url: url)
 
-            allNoteIDs.removeAll { $0 == id }
-            titleByID.removeValue(forKey: id)
-            if currentNoteID == id {
-                currentNoteID = nil
-                currentNoteTitle = ""
-                currentNoteBody = ""
-                currentNoteTags = []
-                currentNoteExtraFrontmatter = ""
+        var moved = false
+        if exists {
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                NSLog("[Slip] trashed \(url.path)")
+                moved = true
+            } catch {
+                NSLog("[Slip] trashItem failed (\(error)); falling back to removeItem")
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    NSLog("[Slip] removed \(url.path)")
+                    moved = true
+                } catch {
+                    NSLog("[Slip] removeItem also failed: \(error)")
+                }
             }
-            applyTagFilter()
-            reindexIncrementally([url])
-        } catch {
-            NSLog("[Slip] Delete failed for \(url.path): \(error)")
+        } else {
+            // File already gone (deleted externally?). Treat as success
+            // so the in-memory state still gets cleaned up.
+            moved = true
         }
+
+        guard moved else { return }
+
+        allNoteIDs.removeAll { $0 == id }
+        titleByID.removeValue(forKey: id)
+        if currentNoteID == id {
+            currentNoteID = nil
+            currentNoteTitle = ""
+            currentNoteBody = ""
+            currentNoteTags = []
+            currentNoteExtraFrontmatter = ""
+        }
+        applyTagFilter()
+        reindexIncrementally([url])
     }
 
     /// Move a note to another folder. `destinationFolder` is the relative

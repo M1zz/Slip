@@ -438,9 +438,10 @@ struct GraphView: View {
             }
         }
         // Draw larger groups first so smaller groups stay readable on
-        // top of them when they overlap.
+        // top of them when they overlap. Skip 1-node groups — a lone
+        // tagged note doesn't visually need a halo around it.
         let ordered = byTag.sorted { $0.value.count > $1.value.count }
-        for (tag, indices) in ordered where !indices.isEmpty {
+        for (tag, indices) in ordered where indices.count >= 2 {
             let path = groupShapePath(for: indices, in: size)
             let fillAlpha: Double = focus == tag ? 0.28 : (focus == nil ? 0.10 : 0.03)
             let strokeAlpha: Double = focus == tag ? 0.55 : (focus == nil ? 0.22 : 0.08)

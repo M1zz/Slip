@@ -51,6 +51,11 @@ final class AppState: ObservableObject {
     /// Every `- [ ]` / `- [x]` task across the vault, refreshed whenever
     /// the index is rewritten. Drives the inspector's aggregated view.
     @Published var allTodos: [TodoItem] = []
+    /// Bumped after every index refresh. The Graph window observes this
+    /// counter to re-pull the snapshot when notes/tags/links change in
+    /// the main editor — without this, edits made in the main window
+    /// leave the open graph stuck on the old layout.
+    @Published var graphRevision: Int = 0
 
     /// Full list from the index; `noteList` reflects the current tag filter.
     private var allNoteIDs: [NoteID] = []
@@ -165,6 +170,7 @@ final class AppState: ObservableObject {
             self.tags = (try? index.listTags()) ?? []
             self.allFolders = listFoldersOnDisk()
             self.allTodos = (try? index.allTodos()) ?? []
+            self.graphRevision &+= 1
             applyTagFilter()
             refreshRediscovery()
         } catch {

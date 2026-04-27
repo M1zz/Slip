@@ -82,6 +82,12 @@ struct GraphView: View {
         }
         .navigationTitle("Graph")
         .task { await loadSnapshot() }
+        // Re-pull the snapshot whenever the index is rewritten in the
+        // main window (note/tag/link changes), so an open graph stays
+        // current with edits the user just made.
+        .onChange(of: appState.graphRevision) { _, _ in
+            Task { await loadSnapshot() }
+        }
         .onReceive(timer) { _ in
             guard loaded, ticksRemaining > 0, !nodes.isEmpty else { return }
             tick()
@@ -427,31 +433,145 @@ struct GraphView: View {
             guard let primary = node.tags.sorted().first else { continue }
             byTag[primary, default: []].append(i)
         }
-        for (tag, indices) in byTag where indices.count >= 2 {
-            var cx: CGFloat = 0, cy: CGFloat = 0
-            for i in indices {
-                cx += nodes[i].position.x
-                cy += nodes[i].position.y
-            }
-            cx /= CGFloat(indices.count)
-            cy /= CGFloat(indices.count)
-            var maxDist: CGFloat = 35
-            for i in indices {
-                let dx = nodes[i].position.x - cx
-                let dy = nodes[i].position.y - cy
-                let d = sqrt(dx * dx + dy * dy) + 26
-                if d > maxDist { maxDist = d }
-            }
-            let center = viewPoint(for: CGPoint(x: cx, y: cy), in: size)
-            let radius = maxDist * zoom
-            let rect = CGRect(x: center.x - radius, y: center.y - radius,
-                              width: radius * 2, height: radius * 2)
+        for (tag, indices) in byTag where !indices.isEmpty {
+            let path = groupShapePath(for: indices, in: size)
             let fillAlpha: Double = focus == tag ? 0.28 : (focus == nil ? 0.10 : 0.03)
-            let strokeAlpha: Double = focus == tag ? 0.55 : (focus == nil ? 0.2 : 0.08)
-            ctx.fill(Path(ellipseIn: rect), with: .color(Self.colorForTag(tag).opacity(fillAlpha)))
-            ctx.stroke(Path(ellipseIn: rect),
-                       with: .color(Self.colorForTag(tag).opacity(strokeAlpha)),
-                       lineWidth: 1)
+            let strokeAlpha: Double = focus == tag ? 0.55 : (focus == nil ? 0.22 : 0.08)
+            ctx.fill(path, with: .color(Self.colorForTag(tag).opacity(fillAlpha)))
+            ctx.stroke(
+                path,
+                with: .color(Self.colorForTag(tag).opacity(strokeAlpha)),
+                lineWidth: 1
+            )
+        }
+    }
+
+    /// Build a smooth, rounded shape that contains every node in the
+    /// given group. Uses the convex hull of the node positions, expanded
+    /// outward so the nodes sit comfortably inside, then drawn with
+    /// quadratic Bezier curves through hull-edge midpoints (each hull
+    /// vertex acts as a control point) so the outline reads as a soft
+    /// blob rather than a sharp polygon. Single-node and 2-node groups
+    /// fall back to a circle and a capsule, since their hulls degenerate.
+    private func groupShapePath(for indices: [Int], in size: CGSize) -> Path {
+        let padding: CGFloat = 28
+        let nodePositions = indices.map { nodes[$0].position }
+
+        if nodePositions.count == 1 {
+            let center = viewPoint(for: nodePositions[0], in: size)
+            let r = padding * zoom
+            return Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r,
+                                          width: r * 2, height: r * 2))
+        }
+        if nodePositions.count == 2 {
+            return capsulePath(from: nodePositions[0], to: nodePositions[1],
+                               radius: padding, in: size)
+        }
+
+        let hull = Self.convexHull(nodePositions)
+        let expanded = Self.expandHull(hull, by: padding)
+        return roundedPath(through: expanded, in: size)
+    }
+
+    private func capsulePath(from a: CGPoint, to b: CGPoint, radius: CGFloat, in size: CGSize) -> Path {
+        // Build a 4-point hull around the two endpoints, then round it.
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let len = max(0.0001, sqrt(dx * dx + dy * dy))
+        let nx = -dy / len
+        let ny = dx / len
+        let r = radius
+        let p1 = CGPoint(x: a.x + nx * r, y: a.y + ny * r)
+        let p2 = CGPoint(x: b.x + nx * r, y: b.y + ny * r)
+        let p3 = CGPoint(x: b.x - nx * r, y: b.y - ny * r)
+        let p4 = CGPoint(x: a.x - nx * r, y: a.y - ny * r)
+        let expanded = Self.expandHull([p1, p2, p3, p4], by: r * 0.6)
+        return roundedPath(through: expanded, in: size)
+    }
+
+    /// Walk a closed polygon as quadratic Bezier curves: start at the
+    /// midpoint of the first edge, then for every vertex draw a quad
+    /// curve to the next edge midpoint with the vertex itself as the
+    /// control point. This rounds every corner softly, which reads as
+    /// a "blob" containing the cluster.
+    private func roundedPath(through points: [CGPoint], in size: CGSize) -> Path {
+        var path = Path()
+        guard points.count >= 3 else {
+            // Degenerate — just stroke a polyline.
+            if let first = points.first {
+                path.move(to: viewPoint(for: first, in: size))
+                for p in points.dropFirst() {
+                    path.addLine(to: viewPoint(for: p, in: size))
+                }
+            }
+            return path
+        }
+        let n = points.count
+        func mid(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
+            CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        }
+        let firstMid = mid(points[n - 1], points[0])
+        path.move(to: viewPoint(for: firstMid, in: size))
+        for i in 0..<n {
+            let curr = points[i]
+            let next = points[(i + 1) % n]
+            let m = mid(curr, next)
+            path.addQuadCurve(
+                to: viewPoint(for: m, in: size),
+                control: viewPoint(for: curr, in: size)
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+
+    /// Andrew's monotone chain convex-hull algorithm. Returns vertices
+    /// in counter-clockwise order. Points are sorted by x then y; we
+    /// build the lower and upper hulls in one pass each, then concatenate.
+    static func convexHull(_ points: [CGPoint]) -> [CGPoint] {
+        guard points.count >= 3 else { return points }
+        let sorted = points.sorted { a, b in
+            if a.x != b.x { return a.x < b.x }
+            return a.y < b.y
+        }
+        func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+        }
+        var lower: [CGPoint] = []
+        for p in sorted {
+            while lower.count >= 2,
+                  cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(p)
+        }
+        var upper: [CGPoint] = []
+        for p in sorted.reversed() {
+            while upper.count >= 2,
+                  cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(p)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        return lower + upper
+    }
+
+    /// Move every hull vertex outward along the ray from the polygon's
+    /// centroid by `padding`, so the resulting shape sits comfortably
+    /// outside the nodes rather than touching them.
+    static func expandHull(_ hull: [CGPoint], by padding: CGFloat) -> [CGPoint] {
+        guard !hull.isEmpty else { return hull }
+        let cx = hull.reduce(0) { $0 + $1.x } / CGFloat(hull.count)
+        let cy = hull.reduce(0) { $0 + $1.y } / CGFloat(hull.count)
+        return hull.map { p in
+            let dx = p.x - cx
+            let dy = p.y - cy
+            let d = sqrt(dx * dx + dy * dy)
+            guard d > 0.0001 else { return p }
+            let scale = (d + padding) / d
+            return CGPoint(x: cx + dx * scale, y: cy + dy * scale)
         }
     }
 

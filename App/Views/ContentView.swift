@@ -68,6 +68,9 @@ struct InspectorView: View {
             RediscoveryView()
                 .frame(maxHeight: .infinity)
             Divider()
+            TodosView()
+                .frame(maxHeight: .infinity)
+            Divider()
             BacklinksView()
                 .frame(maxHeight: .infinity)
         }

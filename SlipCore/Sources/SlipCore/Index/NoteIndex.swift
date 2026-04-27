@@ -82,6 +82,20 @@ public final class NoteIndex {
             """)
         }
 
+        migrator.registerMigration("v2_todos") { db in
+            try db.execute(sql: """
+                CREATE TABLE todos (
+                    note_id TEXT NOT NULL,
+                    line_index INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY (note_id, line_index)
+                );
+                CREATE INDEX idx_todos_note ON todos(note_id);
+                CREATE INDEX idx_todos_completed ON todos(completed);
+            """)
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -97,6 +111,7 @@ public final class NoteIndex {
         public let bodyHash: String
         public let outgoingLinks: [OutgoingLink]
         public let tags: [String]
+        public let todos: [TodoParser.ParsedTodo]
 
         public init(
             id: NoteID,
@@ -107,11 +122,13 @@ public final class NoteIndex {
             modifiedAt: Date,
             bodyHash: String,
             outgoingLinks: [OutgoingLink],
-            tags: [String]
+            tags: [String],
+            todos: [TodoParser.ParsedTodo] = []
         ) {
             self.id = id; self.title = title; self.path = path; self.body = body
             self.createdAt = createdAt; self.modifiedAt = modifiedAt
-            self.bodyHash = bodyHash; self.outgoingLinks = outgoingLinks; self.tags = tags
+            self.bodyHash = bodyHash; self.outgoingLinks = outgoingLinks
+            self.tags = tags; self.todos = todos
         }
     }
 
@@ -167,6 +184,15 @@ public final class NoteIndex {
                     INSERT OR IGNORE INTO tags (note_id, tag) VALUES (?, ?)
                 """, arguments: [note.id.relativePath, tag])
             }
+
+            // 5. Todos — fully replace per source line.
+            try db.execute(sql: "DELETE FROM todos WHERE note_id = ?", arguments: [note.id.relativePath])
+            for todo in note.todos {
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO todos (note_id, line_index, completed, text)
+                    VALUES (?, ?, ?, ?)
+                """, arguments: [note.id.relativePath, todo.lineIndex, todo.completed ? 1 : 0, todo.text])
+            }
         }
     }
 
@@ -176,6 +202,7 @@ public final class NoteIndex {
             try db.execute(sql: "DELETE FROM notes WHERE id = ?", arguments: [id.relativePath])
             try db.execute(sql: "DELETE FROM links WHERE source_id = ? OR target_id = ?", arguments: [id.relativePath, id.relativePath])
             try db.execute(sql: "DELETE FROM tags WHERE note_id = ?", arguments: [id.relativePath])
+            try db.execute(sql: "DELETE FROM todos WHERE note_id = ?", arguments: [id.relativePath])
         }
     }
 
@@ -303,6 +330,27 @@ public final class NoteIndex {
                 )
             }
             return GraphSnapshot(nodes: nodes, edges: edges)
+        }
+    }
+
+    /// Every todo entry across the vault, ordered open-first then by note
+    /// then by line. Drives the aggregated "Todos" inspector view.
+    public func allTodos() throws -> [TodoItem] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT note_id, line_index, completed, text
+                FROM todos
+                ORDER BY completed ASC, note_id ASC, line_index ASC
+            """)
+            return rows.map { row in
+                let completedInt: Int = row["completed"]
+                return TodoItem(
+                    noteID: NoteID(relativePath: row["note_id"]),
+                    lineIndex: row["line_index"],
+                    completed: completedInt != 0,
+                    text: row["text"]
+                )
+            }
         }
     }
 

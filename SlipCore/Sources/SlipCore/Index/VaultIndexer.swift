@@ -79,6 +79,7 @@ public final class VaultIndexer {
                 }
 
                 let hash = Self.sha256(raw.body)
+                let todos = TodoParser.todos(in: raw.body)
                 let indexed = NoteIndex.IndexedNote(
                     id: raw.id,
                     title: raw.title,
@@ -88,7 +89,8 @@ public final class VaultIndexer {
                     modifiedAt: raw.modified,
                     bodyHash: hash,
                     outgoingLinks: outgoing,
-                    tags: tags
+                    tags: tags,
+                    todos: todos
                 )
                 try index.upsert(indexed)
             }
@@ -182,6 +184,7 @@ public final class VaultIndexer {
                 }
 
                 let hash = Self.sha256(body)
+                let todos = TodoParser.todos(in: body)
                 let indexed = NoteIndex.IndexedNote(
                     id: id,
                     title: title,
@@ -191,7 +194,8 @@ public final class VaultIndexer {
                     modifiedAt: modified,
                     bodyHash: hash,
                     outgoingLinks: outgoing,
-                    tags: tags
+                    tags: tags,
+                    todos: todos
                 )
                 try index.upsert(indexed)
             }

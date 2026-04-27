@@ -48,6 +48,9 @@ final class AppState: ObservableObject {
     /// Drives both the empty-folder display in the sidebar tree and the
     /// "Move to…" submenu choices.
     @Published var allFolders: [String] = []
+    /// Every `- [ ]` / `- [x]` task across the vault, refreshed whenever
+    /// the index is rewritten. Drives the inspector's aggregated view.
+    @Published var allTodos: [TodoItem] = []
 
     /// Full list from the index; `noteList` reflects the current tag filter.
     private var allNoteIDs: [NoteID] = []
@@ -161,6 +164,7 @@ final class AppState: ObservableObject {
             )
             self.tags = (try? index.listTags()) ?? []
             self.allFolders = listFoldersOnDisk()
+            self.allTodos = (try? index.allTodos()) ?? []
             applyTagFilter()
             refreshRediscovery()
         } catch {

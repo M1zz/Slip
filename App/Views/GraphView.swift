@@ -427,13 +427,20 @@ struct GraphView: View {
     }
 
     private func drawGroupBubbles(ctx: GraphicsContext, size: CGSize, focus: String?) {
-        // Build primary-tag → node-indices map.
+        // Build tag → all node-indices that carry that tag. A note with
+        // multiple tags shows up in every one of its groups, so notes
+        // shared across tags appear in the visual intersection of their
+        // bubbles (Venn-diagram style).
         var byTag: [String: [Int]] = [:]
         for (i, node) in nodes.enumerated() {
-            guard let primary = node.tags.sorted().first else { continue }
-            byTag[primary, default: []].append(i)
+            for tag in node.tags {
+                byTag[tag, default: []].append(i)
+            }
         }
-        for (tag, indices) in byTag where !indices.isEmpty {
+        // Draw larger groups first so smaller groups stay readable on
+        // top of them when they overlap.
+        let ordered = byTag.sorted { $0.value.count > $1.value.count }
+        for (tag, indices) in ordered where !indices.isEmpty {
             let path = groupShapePath(for: indices, in: size)
             let fillAlpha: Double = focus == tag ? 0.28 : (focus == nil ? 0.10 : 0.03)
             let strokeAlpha: Double = focus == tag ? 0.55 : (focus == nil ? 0.22 : 0.08)

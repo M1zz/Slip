@@ -60,6 +60,14 @@ final class AppState: ObservableObject {
     /// Full list from the index; `noteList` reflects the current tag filter.
     private var allNoteIDs: [NoteID] = []
 
+    /// IDs that were just deleted, with the timestamp of deletion. Used
+    /// to filter the deleted note out of any subsequent
+    /// refreshAfterIndex pass — without this, a vault that lives on
+    /// iCloud Drive can resurrect the file after `trashItem` because
+    /// the cloud sync brings it back, the watcher reports it, and the
+    /// next indexer pass picks it up. Entries expire after 30 seconds.
+    private var deletionTombstones: [NoteID: Date] = [:]
+
     // MARK: - Services
 
     private var index: NoteIndex?
@@ -163,10 +171,21 @@ final class AppState: ObservableObject {
     private func refreshAfterIndex() {
         guard let index else { return }
         do {
-            self.allNoteIDs = try index.allNoteIDs()
-            NSLog("[Slip] refreshAfterIndex: allNoteIDs.count=\(allNoteIDs.count) ids=\(allNoteIDs.map { $0.relativePath }.prefix(10))")
+            // Drop expired tombstones first so they don't block legitimate
+            // recreation of a file the user actively wants back.
+            let cutoff = Date().addingTimeInterval(-30)
+            deletionTombstones = deletionTombstones.filter { $0.value > cutoff }
+
+            let dbIDs = try index.allNoteIDs()
+            // Hide tombstoned ids: even if iCloud / FSEvents resurrect
+            // the file in the index, the user just deleted it, so the
+            // sidebar should pretend it stays gone for 30s.
+            self.allNoteIDs = dbIDs.filter { !deletionTombstones.keys.contains($0) }
+            NSLog("[Slip] refreshAfterIndex: dbIDs=\(dbIDs.count) tombstones=\(deletionTombstones.count) visible=\(allNoteIDs.count)")
             self.titleByID = Dictionary(uniqueKeysWithValues:
-                try index.allMetrics().map { ($0.id, $0.title) }
+                try index.allMetrics()
+                    .filter { !deletionTombstones.keys.contains($0.id) }
+                    .map { ($0.id, $0.title) }
             )
             self.tags = (try? index.listTags()) ?? []
             self.allFolders = listFoldersOnDisk()
@@ -772,7 +791,12 @@ final class AppState: ObservableObject {
             }
         }
 
-        NSLog("[Slip] deleteNote done: allNoteIDs(\(allNoteIDs.count))=\(allNoteIDs.map { $0.relativePath }.prefix(10))")
+        // Park the id in the tombstone table so any downstream
+        // refreshAfterIndex hides it, even if iCloud / the FSEvent
+        // watcher / a vault re-walk resurrects it for a few seconds.
+        deletionTombstones[id] = Date()
+
+        NSLog("[Slip] deleteNote done: allNoteIDs(\(allNoteIDs.count))=\(allNoteIDs.map { $0.relativePath }.prefix(10)) tombstoned=\(id.relativePath)")
         reindexIncrementally([url])
     }
 

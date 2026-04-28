@@ -141,7 +141,9 @@ public final class VaultIndexer {
                 }
 
                 // Deleted file → remove from index.
-                guard fm.fileExists(atPath: url.path) else {
+                let exists = fm.fileExists(atPath: url.path)
+                NSLog("[Slip] reindex inspect: \(url.path) exists=\(exists)")
+                guard exists else {
                     try? index.delete(id: id)
                     continue
                 }

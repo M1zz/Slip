@@ -22,6 +22,7 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        let _ = NSLog("[Slip] sidebar render: displayed=\(displayed.count) noteList=\(appState.noteList.count)")
         VStack(spacing: 0) {
             HStack {
                 Image(systemName: "magnifyingglass")
@@ -87,6 +88,14 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            // Hammer: force the entire List to recreate whenever the
+            // visible note count changes. macOS SwiftUI's List + sidebar
+            // style has been keeping ghost rows after id removal even
+            // through a recursive ForEach + DisclosureGroup tree, and a
+            // forced .id() on the List itself is the only thing that
+            // reliably tears them down. Cost: brief loss of scroll
+            // position on add/delete, which is fine in practice.
+            .id("\(displayed.count)-\(appState.noteList.count)-\(appState.searchResults.count)")
         }
         .toolbar {
             ToolbarItemGroup {

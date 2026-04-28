@@ -197,6 +197,7 @@ public final class NoteIndex {
     }
 
     public func delete(id: NoteID) throws {
+        NSLog("[Slip] index.delete starting for id='\(id.relativePath)'")
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM notes_fts WHERE rowid = (SELECT rowid FROM notes WHERE id = ?)", arguments: [id.relativePath])
             try db.execute(sql: "DELETE FROM notes WHERE id = ?", arguments: [id.relativePath])
@@ -204,6 +205,7 @@ public final class NoteIndex {
             try db.execute(sql: "DELETE FROM tags WHERE note_id = ?", arguments: [id.relativePath])
             try db.execute(sql: "DELETE FROM todos WHERE note_id = ?", arguments: [id.relativePath])
         }
+        NSLog("[Slip] index.delete done for id='\(id.relativePath)'")
     }
 
     // MARK: - Reads

@@ -164,6 +164,7 @@ final class AppState: ObservableObject {
         guard let index else { return }
         do {
             self.allNoteIDs = try index.allNoteIDs()
+            NSLog("[Slip] refreshAfterIndex: allNoteIDs.count=\(allNoteIDs.count) ids=\(allNoteIDs.map { $0.relativePath }.prefix(10))")
             self.titleByID = Dictionary(uniqueKeysWithValues:
                 try index.allMetrics().map { ($0.id, $0.title) }
             )
@@ -758,6 +759,19 @@ final class AppState: ObservableObject {
         }
         applyTagFilter()
         graphRevision &+= 1
+
+        // Synchronously delete from the SQLite index too. Without this,
+        // a refreshAfterIndex that races the background reindex could
+        // overwrite our optimistic allNoteIDs back to the DB-shape that
+        // still contains the deleted id.
+        if let index {
+            do {
+                try index.delete(id: id)
+            } catch {
+                NSLog("[Slip] index.delete failed in deleteNote: \(error)")
+            }
+        }
+
         NSLog("[Slip] deleteNote done: allNoteIDs(\(allNoteIDs.count))=\(allNoteIDs.map { $0.relativePath }.prefix(10))")
         reindexIncrementally([url])
     }

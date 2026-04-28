@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 import SlipCore
 
@@ -7,7 +8,6 @@ struct SidebarView: View {
     @State private var notesExpanded: Bool = true
     @State private var tagsExpanded: Bool = true
     @State private var newFolderPrompt: NewFolderPrompt? = nil
-    @State private var deletePrompt: DeletePrompt? = nil
 
     private var displayed: [NoteID] {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
@@ -96,24 +96,25 @@ struct SidebarView: View {
                 appState.createFolder(name: name, in: prompt.parent)
             }
         }
-        .confirmationDialog(
-            "Move to Trash",
-            isPresented: Binding(
-                get: { deletePrompt != nil },
-                set: { if !$0 { deletePrompt = nil } }
-            ),
-            presenting: deletePrompt
-        ) { prompt in
-            Button("Move to Trash", role: .destructive) {
-                NSLog("[Slip] dialog: deleting '\(prompt.title)' (id=\(prompt.id.relativePath))")
-                appState.deleteNote(prompt.id)
-                deletePrompt = nil
-            }
-            Button("Cancel", role: .cancel) {
-                deletePrompt = nil
-            }
-        } message: { prompt in
-            Text("Move \"\(prompt.title)\" to the system Trash? It can be restored from Finder.")
+    }
+
+    /// Synchronous AppKit confirmation. SwiftUI's confirmationDialog
+    /// occasionally fails to surface when the trigger lives inside a
+    /// NavigationSplitView sidebar's OutlineGroup, while NSAlert.runModal
+    /// is rock-solid for this kind of one-off destructive prompt.
+    private func confirmAndDelete(id: NoteID, title: String) {
+        let alert = NSAlert()
+        alert.messageText = "Move \u{201C}\(title)\u{201D} to Trash?"
+        alert.informativeText = "The file goes to the system Trash and can be restored from Finder."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            NSLog("[Slip] alert confirmed for '\(title)'")
+            appState.deleteNote(id)
+        } else {
+            NSLog("[Slip] alert cancelled for '\(title)'")
         }
     }
 
@@ -159,7 +160,7 @@ struct SidebarView: View {
                 Divider()
                 Button(role: .destructive) {
                     NSLog("[Slip] context menu: requesting delete of '\(title)' (id=\(id.relativePath))")
-                    deletePrompt = DeletePrompt(id: id, title: title)
+                    confirmAndDelete(id: id, title: title)
                 } label: {
                     Text("Move to Trash")
                 }
@@ -290,11 +291,6 @@ struct FileTreeNode: Identifiable {
 private struct NewFolderPrompt: Identifiable {
     let id = UUID()
     let parent: String
-}
-
-private struct DeletePrompt: Identifiable {
-    let id: NoteID
-    let title: String
 }
 
 private struct NewFolderSheet: View {

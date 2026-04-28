@@ -141,16 +141,9 @@ struct SidebarView: View {
                 Divider()
                 Button {
                     NSLog("[Slip] context menu: deleting '\(title)' (id=\(id.relativePath))")
-                    let target = id
-                    // Defer the actual delete one runloop tick so SwiftUI
-                    // can fully dismiss the context menu first; otherwise
-                    // the file-system mutation can race with the still-
-                    // animating menu and the row appears not to update.
-                    DispatchQueue.main.async {
-                        appState.deleteNote(target)
-                    }
+                    appState.deleteNote(id)
                 } label: {
-                    Label("Move to Trash", systemImage: "trash")
+                    Text("Move to Trash")
                 }
             }
             .onDrag {

@@ -538,6 +538,29 @@ final class AppState: ObservableObject {
             NSLog("[Slip] saveCurrentNote skipped: no currentNoteID")
             return
         }
+
+        // Guard against empty saves. Two scenarios produced these and
+        // they both look like "delete didn't work" to the user:
+        //  - Trashed files getting recreated as 0-byte stubs by a
+        //    debounced/lifecycle save that fires with stale ids.
+        //  - The editor briefly transitioning through an empty state
+        //    (e.g., a stale openNote against a trashed path) and that
+        //    empty render landing on disk, wiping the note's content.
+        // If you actually want a note gone, use Move to Trash; bare
+        // empty saves never round-trip useful data anyway.
+        let prospectiveContent = Self.renderNote(
+            title: currentNoteTitle,
+            body: currentNoteBody,
+            tags: currentNoteTags,
+            extraFrontmatter: currentNoteExtraFrontmatter
+        )
+        let trimmedProspective = prospectiveContent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProspective.isEmpty else {
+            NSLog("[Slip] saveCurrentNote skipped: empty content for \(id.relativePath)")
+            return
+        }
+
         // If the title has diverged from the on-disk filename, rename
         // the file before writing so the .md file always matches the
         // human title. The rename updates currentNoteID + allNoteIDs in

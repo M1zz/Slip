@@ -21,6 +21,21 @@ struct SidebarView: View {
         )
     }
 
+    /// Stable identity that changes whenever any node id appears or
+    /// disappears, used as `.id()` on the OutlineGroup so the macOS
+    /// SwiftUI hierarchy actually rebuilds when an item is removed.
+    private var treeSignature: Int {
+        var hasher = Hasher()
+        func walk(_ nodes: [FileTreeNode]) {
+            for node in nodes {
+                hasher.combine(node.id)
+                walk(node.children ?? [])
+            }
+        }
+        walk(noteTree)
+        return hasher.finalize()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -45,6 +60,14 @@ struct SidebarView: View {
                     OutlineGroup(noteTree, id: \.id, children: \.children) { node in
                         rowView(for: node)
                     }
+                    // Force the OutlineGroup to fully rebuild when the
+                    // underlying tree changes shape. macOS SwiftUI's
+                    // OutlineGroup inside a List occasionally fails to
+                    // remove rows whose ids vanished from the data —
+                    // tying its identity to the tree's id signature
+                    // sidesteps that by treating the changed tree as a
+                    // new view.
+                    .id(treeSignature)
                 } header: {
                     Text(notesSectionTitle)
                 }

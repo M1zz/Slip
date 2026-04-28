@@ -346,6 +346,15 @@ struct GraphView: View {
 
     // MARK: - Render
 
+    /// View-space drawing radius for a node, scaled with zoom and the
+    /// node's connection degree. Shared between the edge router (which
+    /// stops the line just before the destination disc so the arrowhead
+    /// stays visible) and the node renderer.
+    private func nodeRadius(forDegree degree: Int) -> CGFloat {
+        let base = 4 + min(12, CGFloat(log2(Double(degree + 2))) * 2.2)
+        return base * max(0.6, min(zoom, 1.5))
+    }
+
     private func draw(ctx: GraphicsContext, size: CGSize) {
         let currentID = appState.currentNoteID
         // Both the sidebar tag filter (appState.selectedTag) and the in-graph
@@ -359,31 +368,65 @@ struct GraphView: View {
         // halo, not a group.
         drawGroupBubbles(ctx: ctx, size: size, focus: filterTag)
 
-        // Edges under nodes — explicit wikilinks as solid lines, bare-title
-        // mentions as thinner dashed lines so the eye weights real links
-        // first.
-        var wikiPath = Path()
-        var mentionPath = Path()
+        // Edges under nodes — explicit wikilinks as solid lines with
+        // arrowheads pointing into the destination node, bare-title
+        // mentions as thinner dashed arrows so the eye weights real
+        // links first. Each line stops just outside the destination
+        // node's radius so the arrowhead doesn't disappear under the
+        // node disc.
+        let edgeOpacity: Double = filterTag == nil ? 0.45 : 0.18
         for edge in edges {
             let from = viewPoint(for: nodes[edge.a].position, in: size)
             let to = viewPoint(for: nodes[edge.b].position, in: size)
-            if edge.kind == "wikilink" {
-                wikiPath.move(to: from); wikiPath.addLine(to: to)
+            let dx = to.x - from.x
+            let dy = to.y - from.y
+            let len = sqrt(dx * dx + dy * dy)
+            let toRadius = nodeRadius(forDegree: nodes[edge.b].degree)
+            let backOff = toRadius + 3
+            guard len > backOff + 4 else { continue }
+            let nx = dx / len
+            let ny = dy / len
+            let endpoint = CGPoint(x: to.x - nx * backOff, y: to.y - ny * backOff)
+
+            let isWiki = edge.kind == "wikilink"
+            let lineColor: Color = isWiki
+                ? .secondary.opacity(edgeOpacity)
+                : .secondary.opacity(edgeOpacity * 0.7)
+
+            var linePath = Path()
+            linePath.move(to: from)
+            linePath.addLine(to: endpoint)
+            if isWiki {
+                ctx.stroke(linePath, with: .color(lineColor), lineWidth: 1.2)
             } else {
-                mentionPath.move(to: from); mentionPath.addLine(to: to)
+                ctx.stroke(
+                    linePath,
+                    with: .color(lineColor),
+                    style: StrokeStyle(lineWidth: 0.8, dash: [3, 3])
+                )
             }
+
+            // Arrowhead — a small filled triangle at the line's tip.
+            let arrowLen: CGFloat = isWiki ? 8 : 6
+            let arrowHalfWidth: CGFloat = arrowLen * 0.5
+            let baseX = endpoint.x - nx * arrowLen
+            let baseY = endpoint.y - ny * arrowLen
+            // Perpendicular vector to (nx, ny).
+            let perpX = -ny
+            let perpY = nx
+            var arrow = Path()
+            arrow.move(to: endpoint)
+            arrow.addLine(to: CGPoint(x: baseX + perpX * arrowHalfWidth,
+                                      y: baseY + perpY * arrowHalfWidth))
+            arrow.addLine(to: CGPoint(x: baseX - perpX * arrowHalfWidth,
+                                      y: baseY - perpY * arrowHalfWidth))
+            arrow.closeSubpath()
+            ctx.fill(arrow, with: .color(lineColor))
         }
-        let edgeOpacity: Double = filterTag == nil ? 0.45 : 0.18
-        ctx.stroke(wikiPath, with: .color(.secondary.opacity(edgeOpacity)), lineWidth: 1.2)
-        ctx.stroke(
-            mentionPath,
-            with: .color(.secondary.opacity(edgeOpacity * 0.7)),
-            style: StrokeStyle(lineWidth: 0.8, dash: [3, 3])
-        )
 
         for node in nodes {
             let p = viewPoint(for: node.position, in: size)
-            let radius: CGFloat = (4 + min(12, CGFloat(log2(Double(node.degree + 2))) * 2.2)) * max(0.6, min(zoom, 1.5))
+            let radius = nodeRadius(forDegree: node.degree)
             let rect = CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2)
 
             let matchesFilter = filterTag.map(node.tags.contains) ?? true

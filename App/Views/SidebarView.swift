@@ -98,25 +98,6 @@ struct SidebarView: View {
         }
     }
 
-    /// Synchronous AppKit confirmation. SwiftUI's confirmationDialog
-    /// occasionally fails to surface when the trigger lives inside a
-    /// NavigationSplitView sidebar's OutlineGroup, while NSAlert.runModal
-    /// is rock-solid for this kind of one-off destructive prompt.
-    private func confirmAndDelete(id: NoteID, title: String) {
-        let alert = NSAlert()
-        alert.messageText = "Move \u{201C}\(title)\u{201D} to Trash?"
-        alert.informativeText = "The file goes to the system Trash and can be restored from Finder."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Move to Trash")
-        alert.addButton(withTitle: "Cancel")
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            NSLog("[Slip] alert confirmed for '\(title)'")
-            appState.deleteNote(id)
-        } else {
-            NSLog("[Slip] alert cancelled for '\(title)'")
-        }
-    }
 
     @ViewBuilder
     private func rowView(for node: FileTreeNode) -> some View {
@@ -158,11 +139,18 @@ struct SidebarView: View {
                     }
                 }
                 Divider()
-                Button(role: .destructive) {
-                    NSLog("[Slip] context menu: requesting delete of '\(title)' (id=\(id.relativePath))")
-                    confirmAndDelete(id: id, title: title)
+                Button {
+                    NSLog("[Slip] context menu: deleting '\(title)' (id=\(id.relativePath))")
+                    let target = id
+                    // Defer the actual delete one runloop tick so SwiftUI
+                    // can fully dismiss the context menu first; otherwise
+                    // the file-system mutation can race with the still-
+                    // animating menu and the row appears not to update.
+                    DispatchQueue.main.async {
+                        appState.deleteNote(target)
+                    }
                 } label: {
-                    Text("Move to Trash")
+                    Label("Move to Trash", systemImage: "trash")
                 }
             }
             .onDrag {

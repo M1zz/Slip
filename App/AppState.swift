@@ -708,7 +708,18 @@ final class AppState: ObservableObject {
         if exists {
             do {
                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                NSLog("[Slip] trashed \(url.path)")
+                // Verify the file is actually gone. trashItem has been
+                // observed returning success while leaving the source
+                // file in place on iCloud Drive folders / certain
+                // unicode filenames. If that happens, hard-remove so
+                // the deletion at least sticks.
+                if FileManager.default.fileExists(atPath: url.path) {
+                    NSLog("[Slip] trashItem returned success but file still exists; using removeItem")
+                    try FileManager.default.removeItem(at: url)
+                    NSLog("[Slip] removed \(url.path)")
+                } else {
+                    NSLog("[Slip] trashed \(url.path)")
+                }
                 moved = true
             } catch {
                 NSLog("[Slip] trashItem failed (\(error)); falling back to removeItem")
@@ -747,6 +758,7 @@ final class AppState: ObservableObject {
         }
         applyTagFilter()
         graphRevision &+= 1
+        NSLog("[Slip] deleteNote done: allNoteIDs(\(allNoteIDs.count))=\(allNoteIDs.map { $0.relativePath }.prefix(10))")
         reindexIncrementally([url])
     }
 

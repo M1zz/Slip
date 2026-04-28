@@ -66,6 +66,15 @@ public final class VaultIndexer {
                     }
                 }
 
+                // Markdown inline links — `[label](note-name)` style — that
+                // resolve to another vault note also count as wikilink edges.
+                Self.appendNoteLinksFromMarkdown(
+                    body: raw.body,
+                    sourceID: raw.id,
+                    titleIndex: titleIndex,
+                    outgoing: &outgoing
+                )
+
                 // Unlinked mentions: scan body for other note titles. Cheap on
                 // small vaults; for large vaults switch to a trie/Aho-Corasick.
                 let lowerBody = raw.body.lowercased()
@@ -170,6 +179,16 @@ public final class VaultIndexer {
                         break
                     }
                 }
+
+                // Markdown inline links to other notes count as wikilink
+                // edges too, so `[Other Note](other-note)` shows up in
+                // the graph just like `[[Other Note]]` does.
+                Self.appendNoteLinksFromMarkdown(
+                    body: body,
+                    sourceID: id,
+                    titleIndex: titleIndex,
+                    outgoing: &outgoing
+                )
 
                 // Unlinked-mention scan on the saved note too, so the graph
                 // picks up bare title mentions immediately instead of only
@@ -305,6 +324,50 @@ public final class VaultIndexer {
     private static func truncate(_ s: String, limit: Int = 80) -> String {
         if s.count <= limit { return s }
         return String(s.prefix(limit)) + "…"
+    }
+
+    /// Inline markdown link regex (`[label](url)`). Cached as a class
+    /// constant so we don't recompile per note.
+    private static let inlineLinkRegex: NSRegularExpression = {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(pattern: #"\[([^\[\]\n]+?)\]\(([^()\s]+?)\)"#)
+    }()
+
+    /// Walk every `[label](url)` markdown link in `body`. When the URL
+    /// looks like a reference to another note in the vault (matches a
+    /// known title or a note's filename stem), append a wikilink edge
+    /// to `outgoing`. External URLs (http/https/mailto/etc.) and
+    /// in-page anchors (`#section`) are skipped. Self-links are
+    /// skipped too. The function deduplicates against existing
+    /// wikilink edges already in `outgoing` so the same target isn't
+    /// added twice.
+    static func appendNoteLinksFromMarkdown(
+        body: String,
+        sourceID: NoteID,
+        titleIndex: [String: NoteID],
+        outgoing: inout [NoteIndex.OutgoingLink]
+    ) {
+        let ns = body as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        inlineLinkRegex.enumerateMatches(in: body, range: fullRange) { match, _, _ in
+            guard let m = match, m.numberOfRanges >= 3 else { return }
+            let urlStr = ns.substring(with: m.range(at: 2))
+            if urlStr.contains("://") || urlStr.hasPrefix("mailto:")
+                || urlStr.hasPrefix("#") || urlStr.hasPrefix("/") {
+                return
+            }
+            let normalized = urlStr.lowercased()
+            var resolved: NoteID? = titleIndex[normalized]
+            if resolved == nil {
+                let stem = ((urlStr as NSString).lastPathComponent as NSString)
+                    .deletingPathExtension.lowercased()
+                if !stem.isEmpty { resolved = titleIndex[stem] }
+            }
+            guard let targetID = resolved, targetID != sourceID else { return }
+            if !outgoing.contains(where: { $0.targetID == targetID && $0.kind == "wikilink" }) {
+                outgoing.append(.init(targetID: targetID, kind: "wikilink"))
+            }
+        }
     }
 
     private static func sha256(_ s: String) -> String {

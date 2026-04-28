@@ -21,21 +21,6 @@ struct SidebarView: View {
         )
     }
 
-    /// Stable identity that changes whenever any node id appears or
-    /// disappears, used as `.id()` on the OutlineGroup so the macOS
-    /// SwiftUI hierarchy actually rebuilds when an item is removed.
-    private var treeSignature: Int {
-        var hasher = Hasher()
-        func walk(_ nodes: [FileTreeNode]) {
-            for node in nodes {
-                hasher.combine(node.id)
-                walk(node.children ?? [])
-            }
-        }
-        walk(noteTree)
-        return hasher.finalize()
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -57,17 +42,21 @@ struct SidebarView: View {
                 }
             )) {
                 Section(isExpanded: $notesExpanded) {
-                    OutlineGroup(noteTree, id: \.id, children: \.children) { node in
-                        rowView(for: node)
+                    // Recursive ForEach + DisclosureGroup instead of
+                    // OutlineGroup. macOS SwiftUI's OutlineGroup keeps
+                    // ghost rows visible when an id disappears from the
+                    // data (even with a forced .id() refresh), so a
+                    // deleted note kept showing even after the in-memory
+                    // model dropped it. ForEach uses standard list
+                    // diffing, which is reliable.
+                    ForEach(noteTree, id: \.id) { node in
+                        SidebarTreeRow(
+                            node: node,
+                            onRequestSubfolder: { path in
+                                newFolderPrompt = NewFolderPrompt(parent: path)
+                            }
+                        )
                     }
-                    // Force the OutlineGroup to fully rebuild when the
-                    // underlying tree changes shape. macOS SwiftUI's
-                    // OutlineGroup inside a List occasionally fails to
-                    // remove rows whose ids vanished from the data —
-                    // tying its identity to the tree's id signature
-                    // sidesteps that by treating the changed tree as a
-                    // new view.
-                    .id(treeSignature)
                 } header: {
                     Text(notesSectionTitle)
                 }
@@ -121,77 +110,6 @@ struct SidebarView: View {
         }
     }
 
-
-    @ViewBuilder
-    private func rowView(for node: FileTreeNode) -> some View {
-        switch node.kind {
-        case .folder(let name, let path):
-            FolderDropZone(name: name) { providers in
-                handleDrop(providers: providers, into: path)
-            }
-            .contextMenu {
-                Button("New Note Here") {
-                    Task { @MainActor in appState.createNewNote(in: path) }
-                }
-                Button("New Subfolder…") {
-                    newFolderPrompt = NewFolderPrompt(parent: path)
-                }
-            }
-        case .note(let id, let title):
-            Button {
-                Task { @MainActor in appState.openNote(id) }
-            } label: {
-                NoteRow(id: id, title: title)
-            }
-            .buttonStyle(.plain)
-            .tag(id)
-            .contextMenu {
-                Menu("Move to") {
-                    Button("Vault Root") {
-                        Task { @MainActor in appState.moveNote(id, toFolder: "") }
-                    }
-                    if !appState.allFolders.isEmpty {
-                        Divider()
-                        ForEach(appState.allFolders, id: \.self) { folder in
-                            Button(folder) {
-                                Task { @MainActor in
-                                    appState.moveNote(id, toFolder: folder)
-                                }
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button {
-                    NSLog("[Slip] context menu: deleting '\(title)' (id=\(id.relativePath))")
-                    appState.deleteNote(id)
-                } label: {
-                    Text("Move to Trash")
-                }
-            }
-            .onDrag {
-                NSItemProvider(object: id.relativePath as NSString)
-            } preview: {
-                NoteDragPreview(title: title)
-            }
-        }
-    }
-
-    private func handleDrop(providers: [NSItemProvider], into folderPath: String) -> Bool {
-        var handled = false
-        for provider in providers {
-            guard provider.canLoadObject(ofClass: NSString.self) else { continue }
-            handled = true
-            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
-                guard let s = object as? NSString else { return }
-                let id = NoteID(relativePath: s as String)
-                Task { @MainActor in
-                    appState.moveNote(id, toFolder: folderPath)
-                }
-            }
-        }
-        return handled
-    }
 
     private var notesSectionTitle: String {
         if let tag = appState.selectedTag {
@@ -287,6 +205,101 @@ struct FileTreeNode: Identifiable {
 
     static func note(id: NoteID, title: String) -> FileTreeNode {
         FileTreeNode(id: "n:\(id.relativePath)", kind: .note(id: id, title: title), children: nil)
+    }
+}
+
+// MARK: - Recursive tree row
+
+/// Renders one node of the sidebar tree, recursing into its children
+/// for folders. We do this with a dedicated struct (rather than
+/// OutlineGroup) because OutlineGroup on macOS sometimes keeps ghost
+/// rows visible after their id disappears from the data — which is
+/// what was making "Move to Trash" look like it didn't work.
+private struct SidebarTreeRow: View {
+    @EnvironmentObject var appState: AppState
+    let node: FileTreeNode
+    let onRequestSubfolder: (String) -> Void
+
+    var body: some View {
+        switch node.kind {
+        case .folder(let name, let path):
+            DisclosureGroup {
+                if let children = node.children {
+                    ForEach(children, id: \.id) { child in
+                        SidebarTreeRow(
+                            node: child,
+                            onRequestSubfolder: onRequestSubfolder
+                        )
+                    }
+                }
+            } label: {
+                FolderDropZone(name: name) { providers in
+                    Self.handleDrop(providers: providers, into: path, appState: appState)
+                }
+                .contextMenu {
+                    Button("New Note Here") {
+                        Task { @MainActor in appState.createNewNote(in: path) }
+                    }
+                    Button("New Subfolder…") {
+                        onRequestSubfolder(path)
+                    }
+                }
+            }
+        case .note(let id, let title):
+            Button {
+                Task { @MainActor in appState.openNote(id) }
+            } label: {
+                NoteRow(id: id, title: title)
+            }
+            .buttonStyle(.plain)
+            .tag(id)
+            .contextMenu {
+                Menu("Move to") {
+                    Button("Vault Root") {
+                        Task { @MainActor in appState.moveNote(id, toFolder: "") }
+                    }
+                    if !appState.allFolders.isEmpty {
+                        Divider()
+                        ForEach(appState.allFolders, id: \.self) { folder in
+                            Button(folder) {
+                                Task { @MainActor in
+                                    appState.moveNote(id, toFolder: folder)
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    NSLog("[Slip] context menu: deleting '\(title)' (id=\(id.relativePath))")
+                    appState.deleteNote(id)
+                } label: {
+                    Text("Move to Trash")
+                }
+            }
+            .onDrag {
+                NSItemProvider(object: id.relativePath as NSString)
+            } preview: {
+                NoteDragPreview(title: title)
+            }
+        }
+    }
+
+    private static func handleDrop(providers: [NSItemProvider], into folderPath: String,
+                                   appState: AppState) -> Bool {
+        var handled = false
+        for provider in providers {
+            guard provider.canLoadObject(ofClass: NSString.self) else { continue }
+            handled = true
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let s = object as? NSString else { return }
+                let id = NoteID(relativePath: s as String)
+                Task { @MainActor in
+                    appState.moveNote(id, toFolder: folderPath)
+                }
+            }
+        }
+        return handled
     }
 }
 

@@ -211,7 +211,12 @@ final class AppState: ObservableObject {
             return
         }
         if let tag = selectedTag {
-            noteList = (try? index.noteIDs(withTag: tag)) ?? []
+            let dbIDs = (try? index.noteIDs(withTag: tag)) ?? []
+            // Intersect with allNoteIDs so optimistically-deleted notes
+            // disappear immediately even though the DB row hasn't been
+            // removed yet by the background reindex.
+            let valid = Set(allNoteIDs)
+            noteList = dbIDs.filter { valid.contains($0) }
         } else {
             noteList = allNoteIDs
         }
@@ -723,8 +728,16 @@ final class AppState: ObservableObject {
 
         guard moved else { return }
 
+        // Optimistically scrub every published surface that could keep
+        // showing the trashed note while the background reindex catches
+        // up. Without this, the row stayed visible because something
+        // (search results, todos, the tag-filtered note list, the
+        // backlinks panel) still referenced its id.
         allNoteIDs.removeAll { $0 == id }
         titleByID.removeValue(forKey: id)
+        searchResults.removeAll { $0 == id }
+        backlinks.removeAll { $0 == id }
+        allTodos.removeAll { $0.noteID == id }
         if currentNoteID == id {
             currentNoteID = nil
             currentNoteTitle = ""
@@ -733,6 +746,7 @@ final class AppState: ObservableObject {
             currentNoteExtraFrontmatter = ""
         }
         applyTagFilter()
+        graphRevision &+= 1
         reindexIncrementally([url])
     }
 

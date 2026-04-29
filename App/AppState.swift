@@ -171,20 +171,16 @@ final class AppState: ObservableObject {
     private func refreshAfterIndex() {
         guard let index else { return }
         do {
-            // Drop expired tombstones first so they don't block legitimate
-            // recreation of a file the user actively wants back.
+            // Expire tombstones so they can't block intentional recreation later.
             let cutoff = Date().addingTimeInterval(-30)
             deletionTombstones = deletionTombstones.filter { $0.value > cutoff }
+            let blocked = Set(deletionTombstones.keys)
 
             let dbIDs = try index.allNoteIDs()
-            // Hide tombstoned ids: even if iCloud / FSEvents resurrect
-            // the file in the index, the user just deleted it, so the
-            // sidebar should pretend it stays gone for 30s.
-            self.allNoteIDs = dbIDs.filter { !deletionTombstones.keys.contains($0) }
-            NSLog("[Slip] refreshAfterIndex: dbIDs=\(dbIDs.count) tombstones=\(deletionTombstones.count) visible=\(allNoteIDs.count)")
+            self.allNoteIDs = dbIDs.filter { !blocked.contains($0) }
             self.titleByID = Dictionary(uniqueKeysWithValues:
                 try index.allMetrics()
-                    .filter { !deletionTombstones.keys.contains($0.id) }
+                    .filter { !blocked.contains($0.id) }
                     .map { ($0.id, $0.title) }
             )
             self.tags = (try? index.listTags()) ?? []
@@ -194,7 +190,7 @@ final class AppState: ObservableObject {
             applyTagFilter()
             refreshRediscovery()
         } catch {
-            NSLog("Refresh failed: \(error)")
+            NSLog("[Slip] refresh failed: \(error)")
         }
     }
 
@@ -555,130 +551,53 @@ final class AppState: ObservableObject {
     }
 
     func saveCurrentNote() {
-        guard let vault else {
-            NSLog("[Slip] saveCurrentNote skipped: no vault")
-            return
-        }
-        guard let id = currentNoteID else {
-            NSLog("[Slip] saveCurrentNote skipped: no currentNoteID")
-            return
-        }
+        guard let vault else { return }
+        guard let id = currentNoteID else { return }
 
-        // Guard against empty saves. Two scenarios produced these and
-        // they both look like "delete didn't work" to the user:
-        //  - Trashed files getting recreated as 0-byte stubs by a
-        //    debounced/lifecycle save that fires with stale ids.
-        //  - The editor briefly transitioning through an empty state
-        //    (e.g., a stale openNote against a trashed path) and that
-        //    empty render landing on disk, wiping the note's content.
-        // If you actually want a note gone, use Move to Trash; bare
-        // empty saves never round-trip useful data anyway.
-        let prospectiveContent = Self.renderNote(
-            title: currentNoteTitle,
-            body: currentNoteBody,
-            tags: currentNoteTags,
-            extraFrontmatter: currentNoteExtraFrontmatter
-        )
-        let trimmedProspective = prospectiveContent
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProspective.isEmpty else {
-            NSLog("[Slip] saveCurrentNote skipped: empty content for \(id.relativePath)")
-            return
-        }
-
-        // If the title has diverged from the on-disk filename, rename
-        // the file before writing so the .md file always matches the
-        // human title. The rename updates currentNoteID + allNoteIDs in
-        // place so the sidebar refreshes immediately, then we write to
-        // the new URL.
-        let (writeURL, writeID) = renameToMatchTitleIfNeeded(id: id, vault: vault)
-
-        let url = writeURL
+        // Refuse empty writes. They show up two ways and both look like
+        // "delete didn't stick": (a) a debounced/lifecycle save firing
+        // for a just-trashed note resurrects it as a 0-byte stub;
+        // (b) a stale editor state writes empty content over a real
+        // note. Either way, we'd rather skip than corrupt — explicit
+        // delete is the only way notes go away.
         let fullContent = Self.renderNote(
             title: currentNoteTitle,
             body: currentNoteBody,
             tags: currentNoteTags,
             extraFrontmatter: currentNoteExtraFrontmatter
         )
+        guard !fullContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // Rename the .md file to match the title if the user changed
+        // it. The rename runs through the same renameInState helper as
+        // the explicit Move action, so the sidebar reflects the new
+        // path right away.
+        let writeURL = renameToMatchTitleIfNeeded(id: id, vault: vault)
         do {
-            try writer.write(fullContent, to: url)
-            NSLog("[Slip] saved \(fullContent.count) chars to \(url.path)")
-            markInternalWrite(url: url)
-            reindexIncrementally([url])
+            try writer.write(fullContent, to: writeURL)
+            markInternalWrite(url: writeURL)
+            reindexIncrementally([writeURL])
+            NSLog("[Slip] saved \(writeURL.lastPathComponent) (\(fullContent.count) chars)")
         } catch {
-            NSLog("[Slip] Save failed for \(url.path): \(error)")
-        }
-        _ = writeID
-    }
-
-    /// If the editor's title differs from the current filename, rename
-    /// the file (handling collisions with " 2" suffixes) and patch the
-    /// in-memory state so subsequent saves write to the new path.
-    /// Returns the URL/ID to write to (new or unchanged).
-    private func renameToMatchTitleIfNeeded(id: NoteID, vault: Vault) -> (URL, NoteID) {
-        let originalURL = vault.url(for: id)
-        let trimmedTitle = currentNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return (originalURL, id) }
-
-        let safeStem = NoteWriter.safeFilename(from: trimmedTitle)
-        let currentStem = originalURL.deletingPathExtension().lastPathComponent
-        guard currentStem != safeStem else { return (originalURL, id) }
-
-        let parentURL = originalURL.deletingLastPathComponent()
-        var targetURL = parentURL.appendingPathComponent("\(safeStem).md")
-        var n = 1
-        while FileManager.default.fileExists(atPath: targetURL.path),
-              targetURL.standardizedFileURL != originalURL.standardizedFileURL {
-            n += 1
-            targetURL = parentURL.appendingPathComponent("\(safeStem) \(n).md")
-        }
-        guard targetURL.standardizedFileURL != originalURL.standardizedFileURL else {
-            return (originalURL, id)
-        }
-        do {
-            try FileManager.default.moveItem(at: originalURL, to: targetURL)
-            NSLog("[Slip] renamed \(originalURL.lastPathComponent) → \(targetURL.lastPathComponent)")
-            markInternalWrite(url: originalURL)
-            markInternalWrite(url: targetURL)
-            guard let newID = try? vault.noteID(for: targetURL) else {
-                return (targetURL, id)
-            }
-            if let idx = allNoteIDs.firstIndex(of: id) {
-                allNoteIDs[idx] = newID
-            }
-            if let title = titleByID.removeValue(forKey: id) {
-                titleByID[newID] = title
-            }
-            currentNoteID = newID
-            applyTagFilter()
-            return (targetURL, newID)
-        } catch {
-            NSLog("[Slip] Rename on save failed: \(error)")
-            return (originalURL, id)
+            NSLog("[Slip] save failed: \(error)")
         }
     }
 
     func createNewNote(in folder: String = "") {
-        guard let vault else {
-            NSLog("[Slip] createNewNote skipped: no vault")
-            return
-        }
-        // Flush pending edits on the current note before creating a new one.
-        if currentNoteID != nil {
-            saveCurrentNote()
-        }
+        guard let vault else { return }
+        flushPendingEdits()
         do {
             let note = try writer.createNew(in: vault, title: "Untitled", folder: folder, body: "")
-            NSLog("[Slip] created note at \(note.url.path)")
+            markInternalWrite(url: note.url)
             currentNoteID = note.id
             currentNoteTitle = ""
             currentNoteBody = ""
             currentNoteTags = []
             currentNoteExtraFrontmatter = ""
-            markInternalWrite(url: note.url)
             reindexIncrementally([note.url])
+            NSLog("[Slip] created \(note.url.lastPathComponent)")
         } catch {
-            NSLog("[Slip] Create failed in \(vault.root.path): \(error)")
+            NSLog("[Slip] create failed: \(error)")
         }
     }
 
@@ -703,157 +622,166 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Move the note's file to the system Trash. Optimistically scrubs
-    /// the note from in-memory state so the sidebar reacts immediately,
-    /// then runs an incremental reindex to drop the DB row. Using
-    /// `trashItem` (rather than `removeItem`) keeps the file recoverable
-    /// from Finder for as long as the user wants. Falls back to
-    /// `removeItem` if Trash isn't available (e.g., the vault is on a
-    /// volume without a Trash) so the user isn't left with a phantom
-    /// file in the sidebar.
+    /// Send the note's file to the system Trash, falling back to a
+    /// permanent delete if Trash isn't usable for that path. Drops the
+    /// note from every published surface, syncs the SQLite index, and
+    /// tombstones the id so iCloud / FSEvent re-creates can't bring
+    /// the row back into the sidebar for ~30s.
     func deleteNote(_ id: NoteID) {
-        NSLog("[Slip] deleteNote called for id='\(id.relativePath)'")
-        guard let vault else {
-            NSLog("[Slip] deleteNote skipped: no vault")
-            return
-        }
+        guard let vault else { return }
         let url = vault.url(for: id)
-        let exists = FileManager.default.fileExists(atPath: url.path)
-        NSLog("[Slip] deleteNote: target \(url.path) exists=\(exists)")
-        // Mark before the actual move so the FSEvent echo is suppressed
-        // even if it fires before our reindex starts.
         markInternalWrite(url: url)
 
-        var moved = false
-        if exists {
+        if FileManager.default.fileExists(atPath: url.path) {
             do {
-                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                // Verify the file is actually gone. trashItem has been
-                // observed returning success while leaving the source
-                // file in place on iCloud Drive folders / certain
-                // unicode filenames. If that happens, hard-remove so
-                // the deletion at least sticks.
-                if FileManager.default.fileExists(atPath: url.path) {
-                    NSLog("[Slip] trashItem returned success but file still exists; using removeItem")
-                    try FileManager.default.removeItem(at: url)
-                    NSLog("[Slip] removed \(url.path)")
-                } else {
-                    NSLog("[Slip] trashed \(url.path)")
-                }
-                moved = true
+                try trashOrRemove(url: url)
             } catch {
-                NSLog("[Slip] trashItem failed (\(error)); falling back to removeItem")
-                do {
-                    try FileManager.default.removeItem(at: url)
-                    NSLog("[Slip] removed \(url.path)")
-                    moved = true
-                } catch {
-                    NSLog("[Slip] removeItem also failed: \(error)")
-                }
+                NSLog("[Slip] delete failed: \(error)")
+                return
             }
-        } else {
-            // File already gone (deleted externally?). Treat as success
-            // so the in-memory state still gets cleaned up.
-            moved = true
         }
+        dropFromState(id)
+        deletionTombstones[id] = Date()
+        reindexIncrementally([url])
+        NSLog("[Slip] deleted \(url.lastPathComponent)")
+    }
 
-        guard moved else { return }
+    /// Move the note's file to a different folder under the vault.
+    /// Empty `destinationFolder` means the vault root. Filename clashes
+    /// at the destination get a " 2", " 3", … suffix.
+    func moveNote(_ id: NoteID, toFolder destinationFolder: String) {
+        guard let vault else { return }
+        let oldURL = vault.url(for: id)
+        let parentURL = destinationFolder.isEmpty
+            ? vault.root
+            : vault.root.appendingPathComponent(destinationFolder)
+        guard parentURL.standardizedFileURL != oldURL.deletingLastPathComponent().standardizedFileURL
+        else { return }
+        do {
+            try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            let newURL = uniqueDestination(in: parentURL, named: oldURL.lastPathComponent)
+            try FileManager.default.moveItem(at: oldURL, to: newURL)
+            markInternalWrite(url: oldURL)
+            markInternalWrite(url: newURL)
+            if let newID = try? vault.noteID(for: newURL) {
+                renameInState(from: id, to: newID)
+            }
+            reindexIncrementally([oldURL, newURL])
+            NSLog("[Slip] moved \(oldURL.lastPathComponent) → \(destinationFolder.isEmpty ? "<root>" : destinationFolder)")
+        } catch {
+            NSLog("[Slip] move failed: \(error)")
+        }
+    }
 
-        // Optimistically scrub every published surface that could keep
-        // showing the trashed note while the background reindex catches
-        // up. Without this, the row stayed visible because something
-        // (search results, todos, the tag-filtered note list, the
-        // backlinks panel) still referenced its id.
+    /// If the editor's title diverged from the current filename, rename
+    /// the .md file to match. Returns the URL to write to (the renamed
+    /// one, or the original if no rename was needed). Mutates state via
+    /// renameInState so this matches the moveNote pipeline.
+    private func renameToMatchTitleIfNeeded(id: NoteID, vault: Vault) -> URL {
+        let originalURL = vault.url(for: id)
+        let trimmedTitle = currentNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return originalURL }
+
+        let safeStem = NoteWriter.safeFilename(from: trimmedTitle)
+        let currentStem = originalURL.deletingPathExtension().lastPathComponent
+        guard currentStem != safeStem else { return originalURL }
+
+        let parentURL = originalURL.deletingLastPathComponent()
+        var targetURL = parentURL.appendingPathComponent("\(safeStem).md")
+        var n = 1
+        while FileManager.default.fileExists(atPath: targetURL.path),
+              targetURL.standardizedFileURL != originalURL.standardizedFileURL {
+            n += 1
+            targetURL = parentURL.appendingPathComponent("\(safeStem) \(n).md")
+        }
+        guard targetURL.standardizedFileURL != originalURL.standardizedFileURL
+        else { return originalURL }
+        do {
+            try FileManager.default.moveItem(at: originalURL, to: targetURL)
+            markInternalWrite(url: originalURL)
+            markInternalWrite(url: targetURL)
+            guard let newID = try? vault.noteID(for: targetURL) else { return targetURL }
+            renameInState(from: id, to: newID)
+            return targetURL
+        } catch {
+            NSLog("[Slip] rename failed: \(error)")
+            return originalURL
+        }
+    }
+
+    // MARK: - State mutation helpers
+
+    /// Forget every reference the in-memory model holds to the given
+    /// note id, plus drop its row from the SQLite index. Used by
+    /// deleteNote (and by anything else that needs the note gone now).
+    private func dropFromState(_ id: NoteID) {
         allNoteIDs.removeAll { $0 == id }
         titleByID.removeValue(forKey: id)
         searchResults.removeAll { $0 == id }
         backlinks.removeAll { $0 == id }
         allTodos.removeAll { $0.noteID == id }
-        if currentNoteID == id {
-            currentNoteID = nil
-            currentNoteTitle = ""
-            currentNoteBody = ""
-            currentNoteTags = []
-            currentNoteExtraFrontmatter = ""
-        }
+        if currentNoteID == id { clearCurrentNoteState() }
+        try? index?.delete(id: id)
         applyTagFilter()
         graphRevision &+= 1
-
-        // Synchronously delete from the SQLite index too. Without this,
-        // a refreshAfterIndex that races the background reindex could
-        // overwrite our optimistic allNoteIDs back to the DB-shape that
-        // still contains the deleted id.
-        if let index {
-            do {
-                try index.delete(id: id)
-            } catch {
-                NSLog("[Slip] index.delete failed in deleteNote: \(error)")
-            }
-        }
-
-        // Park the id in the tombstone table so any downstream
-        // refreshAfterIndex hides it, even if iCloud / the FSEvent
-        // watcher / a vault re-walk resurrects it for a few seconds.
-        deletionTombstones[id] = Date()
-
-        NSLog("[Slip] deleteNote done: allNoteIDs(\(allNoteIDs.count))=\(allNoteIDs.map { $0.relativePath }.prefix(10)) tombstoned=\(id.relativePath)")
-        reindexIncrementally([url])
     }
 
-    /// Move a note to another folder. `destinationFolder` is the relative
-    /// path inside the vault ("" for vault root). Filenames keep the same
-    /// basename; if a collision exists we suffix " 2", " 3", etc.
-    func moveNote(_ id: NoteID, toFolder destinationFolder: String) {
-        guard let vault else { return }
-        let oldURL = vault.url(for: id)
-        let filename = oldURL.lastPathComponent
-        let parentURL = destinationFolder.isEmpty
-            ? vault.root
-            : vault.root.appendingPathComponent(destinationFolder)
-        // Skip no-op moves (already in that folder).
-        if parentURL.standardizedFileURL == oldURL.deletingLastPathComponent().standardizedFileURL {
-            return
+    /// Replace the old id with the new one across every published
+    /// surface and the SQLite index. Called by both moveNote and the
+    /// title-driven rename path so they share the same cleanup.
+    private func renameInState(from oldID: NoteID, to newID: NoteID) {
+        if let idx = allNoteIDs.firstIndex(of: oldID) {
+            allNoteIDs[idx] = newID
         }
+        if let title = titleByID.removeValue(forKey: oldID) {
+            titleByID[newID] = title
+        }
+        if currentNoteID == oldID { currentNoteID = newID }
+        // Old DB row will be replaced when reindex sees the new path; we
+        // pre-emptively drop it so a racing refreshAfterIndex can't put
+        // the old id back into allNoteIDs.
+        try? index?.delete(id: oldID)
+        applyTagFilter()
+        graphRevision &+= 1
+    }
+
+    private func clearCurrentNoteState() {
+        currentNoteID = nil
+        currentNoteTitle = ""
+        currentNoteBody = ""
+        currentNoteTags = []
+        currentNoteExtraFrontmatter = ""
+    }
+
+    private func flushPendingEdits() {
+        if currentNoteID != nil { saveCurrentNote() }
+    }
+
+    /// Resolve filename collisions inside `parent` by appending "2", "3"…
+    /// to the stem. Returns a URL that doesn't currently exist on disk.
+    private func uniqueDestination(in parent: URL, named filename: String) -> URL {
+        let stem = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        var candidate = parent.appendingPathComponent(filename)
+        var n = 1
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            n += 1
+            candidate = parent.appendingPathComponent("\(stem) \(n).\(ext)")
+        }
+        return candidate
+    }
+
+    /// Trash if possible, fall through to a hard remove if Trash refuses
+    /// the volume or silently no-ops (which we've seen on iCloud Drive
+    /// for non-ASCII filenames).
+    private func trashOrRemove(url: URL) throws {
         do {
-            if !FileManager.default.fileExists(atPath: parentURL.path) {
-                try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
             }
-            // Resolve filename collision.
-            let stem = (filename as NSString).deletingPathExtension
-            let ext = (filename as NSString).pathExtension
-            var candidate = parentURL.appendingPathComponent(filename)
-            var n = 1
-            while FileManager.default.fileExists(atPath: candidate.path) {
-                n += 1
-                candidate = parentURL.appendingPathComponent("\(stem) \(n).\(ext)")
-            }
-            try FileManager.default.moveItem(at: oldURL, to: candidate)
-            NSLog("[Slip] moved \(oldURL.path) → \(candidate.path)")
-            markInternalWrite(url: oldURL)
-            markInternalWrite(url: candidate)
-
-            // Optimistic UI update: rewrite the in-memory note list with
-            // the new path so the sidebar tree flips immediately. Without
-            // this, the user would see the note in the old folder until
-            // the background reindex (Task.detached → DB write →
-            // refreshAfterIndex) finished, which is what gave the
-            // appearance of "two places at once".
-            if let newID = try? vault.noteID(for: candidate) {
-                if let idx = allNoteIDs.firstIndex(of: id) {
-                    allNoteIDs[idx] = newID
-                }
-                if let title = titleByID.removeValue(forKey: id) {
-                    titleByID[newID] = title
-                }
-                if currentNoteID == id {
-                    self.currentNoteID = newID
-                }
-                applyTagFilter()
-            }
-
-            reindexIncrementally([oldURL, candidate])
         } catch {
-            NSLog("[Slip] Move failed (\(oldURL.path) → \(parentURL.path)): \(error)")
+            try FileManager.default.removeItem(at: url)
         }
     }
 

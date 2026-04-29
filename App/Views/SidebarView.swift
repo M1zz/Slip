@@ -22,7 +22,6 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        let _ = NSLog("[Slip] sidebar render: displayed=\(displayed.count) noteList=\(appState.noteList.count)")
         VStack(spacing: 0) {
             HStack {
                 Image(systemName: "magnifyingglass")

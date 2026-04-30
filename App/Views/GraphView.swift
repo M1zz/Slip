@@ -213,6 +213,11 @@ struct GraphView: View {
         self.nodes = built
         self.edges = builtEdges
         self.loaded = true
+        // Restart the simulation budget on every (re)load so a
+        // graphRevision-triggered refresh actually re-runs physics —
+        // otherwise ticksRemaining stays at 0 from the prior settle
+        // and new nodes/tags never get a chance to cluster.
+        self.ticksRemaining = 400
     }
 
     // MARK: - Physics
@@ -257,11 +262,15 @@ struct GraphView: View {
             forces[b].dx -= fx; forces[b].dy -= fy
         }
 
-        // Same-tag attraction: nodes sharing a tag pull toward each other so
-        // groups coalesce in space. Scales linearly with distance so it
-        // doesn't explode at close range; clamped distance floor avoids
-        // singularities.
-        let kTagAttract: CGFloat = 0.003
+        // Same-tag attraction: nodes sharing a tag pull toward each other
+        // so each tag's notes coalesce into a tight, distinguishable
+        // cluster (which then gets its own bubble). Scaled to actually
+        // overcome the pairwise repulsion at typical layout distances —
+        // earlier versions used 0.003, which was barely a tug and let
+        // same-tag notes drift across the graph, making the convex-hull
+        // bubbles span huge areas that overlapped each other into one
+        // visual blob.
+        let kTagAttract: CGFloat = 0.018
         for i in 0..<count {
             let tagsI = nodes[i].tags
             guard !tagsI.isEmpty else { continue }

@@ -87,14 +87,16 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
-            // Hammer: force the entire List to recreate whenever the
-            // visible note count changes. macOS SwiftUI's List + sidebar
-            // style has been keeping ghost rows after id removal even
-            // through a recursive ForEach + DisclosureGroup tree, and a
-            // forced .id() on the List itself is the only thing that
-            // reliably tears them down. Cost: brief loss of scroll
-            // position on add/delete, which is fine in practice.
-            .id("\(displayed.count)-\(appState.noteList.count)-\(appState.searchResults.count)")
+            // Animate row insertions/removals so create and delete feel
+            // alive instead of snapping. We key on the visible id list
+            // so the spring fires precisely when rows enter or leave —
+            // not on every selection or title edit. Combined with the
+            // .transition modifier on each note row below, new notes
+            // slide in from the top and deletions fade out and shrink.
+            .animation(.spring(response: 0.32, dampingFraction: 0.82),
+                       value: appState.noteList)
+            .animation(.spring(response: 0.32, dampingFraction: 0.82),
+                       value: appState.searchResults)
         }
         .toolbar {
             ToolbarItemGroup {
@@ -261,6 +263,18 @@ private struct SidebarTreeRow: View {
             }
             .buttonStyle(.plain)
             .tag(id)
+            // New notes glide in from above; deleted notes fade,
+            // shrink, and drift to the leading edge so the action
+            // reads clearly as "swept away into the trash".
+            // Asymmetric so create vs. delete feel distinct.
+            .transition(.asymmetric(
+                insertion: .move(edge: .top)
+                    .combined(with: .opacity)
+                    .combined(with: .scale(scale: 0.92, anchor: .top)),
+                removal: .opacity
+                    .combined(with: .scale(scale: 0.6, anchor: .leading))
+                    .combined(with: .offset(x: -24, y: 0))
+            ))
             .contextMenu {
                 Menu("Move to") {
                     Button("Vault Root") {
@@ -280,7 +294,14 @@ private struct SidebarTreeRow: View {
                 Divider()
                 Button {
                     NSLog("[Slip] context menu: deleting '\(title)' (id=\(id.relativePath))")
-                    appState.deleteNote(id)
+                    // Wrap in withAnimation so the row's removal
+                    // transition (defined below) actually plays —
+                    // context menu callbacks otherwise run outside
+                    // any animation context and the row would just
+                    // pop out without the fade/shrink.
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) {
+                        appState.deleteNote(id)
+                    }
                 } label: {
                     Text("Move to Trash")
                 }

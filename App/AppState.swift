@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import CryptoKit
 import SlipCore
 
 @MainActor
@@ -88,13 +89,42 @@ final class AppState: ObservableObject {
     }
 
     func restoreVault() {
-        guard let data = UserDefaults.standard.data(forKey: "VaultBookmark") else { return }
-        do {
-            try activate(bookmark: VaultBookmark(data: data))
-        } catch {
-            NSLog("Failed to restore vault: \(error)")
-            UserDefaults.standard.removeObject(forKey: "VaultBookmark")
+        if let data = UserDefaults.standard.data(forKey: "VaultBookmark") {
+            do {
+                try activate(bookmark: VaultBookmark(data: data))
+                return
+            } catch {
+                NSLog("Failed to restore vault: \(error)")
+                UserDefaults.standard.removeObject(forKey: "VaultBookmark")
+            }
         }
+        // No saved bookmark (or it was unusable) — if iCloud Drive
+        // already has a Slip/ folder, open it automatically. This is
+        // what makes "install on a second Mac" zero-click: the
+        // markdown files have already synced down via iCloud, so we
+        // just point at them.
+        if let url = Self.autoDetectICloudVault() {
+            openVault(at: url)
+        }
+    }
+
+    /// Returns `~/Library/Mobile Documents/com~apple~CloudDocs/Slip/`
+    /// if the directory already exists. We don't create it here —
+    /// that's the welcome screen's job — so a brand-new user without
+    /// any existing iCloud notes still sees the picker.
+    private static func autoDetectICloudVault() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let url = home
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Mobile Documents", isDirectory: true)
+            .appendingPathComponent("com~apple~CloudDocs", isDirectory: true)
+            .appendingPathComponent("Slip", isDirectory: true)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              isDir.boolValue else {
+            return nil
+        }
+        return url
     }
 
     private var watcher: VaultWatcher?
@@ -112,6 +142,13 @@ final class AppState: ObservableObject {
         NSLog("[Slip] vault opened at \(vault.root.path), security-scope access=\(accessGranted)")
         let vaultID = Self.stableVaultID(for: vault.root)
         let dbURL = try NoteIndex.defaultURL(for: vaultID)
+        // Earlier builds derived the DB filename from a randomly-seeded
+        // Swift Hasher, so each launch wrote a brand-new sqlite into
+        // Application Support and the old ones piled up indefinitely
+        // (we found 50+ on this machine). Now that the filename is
+        // deterministic, sweep any sibling DBs we don't own — they're
+        // dead state from those old launches and just waste disk.
+        Self.cleanupOrphanIndexDatabases(keep: dbURL)
         let index = try NoteIndex(databaseURL: dbURL)
         let indexer = VaultIndexer(vault: vault, index: index)
 
@@ -171,6 +208,15 @@ final class AppState: ObservableObject {
     private func refreshAfterIndex() {
         guard let index else { return }
         do {
+            // Defensive GC sweep before we read. The per-URL reindex
+            // path normally cleans stale rows, but a delete-while-app-
+            // is-not-running (or an FSEvent we missed) can leave a
+            // ghost row whose file doesn't exist on disk. Without
+            // this sweep that ghost would still show up as a node in
+            // the graph view (which reads the DB directly), which is
+            // exactly the "Untitled" leak we hit before.
+            try? indexer?.garbageCollect()
+
             // Expire tombstones so they can't block intentional recreation later.
             let cutoff = Date().addingTimeInterval(-30)
             deletionTombstones = deletionTombstones.filter { $0.value > cutoff }
@@ -856,11 +902,43 @@ final class AppState: ObservableObject {
     // MARK: - Helpers
 
     private static func stableVaultID(for url: URL) -> String {
-        // Hash the canonical path so different vaults get different DBs.
+        // SHA-256 of the canonical path. We can't use Swift's Hasher
+        // here: it seeds itself randomly per process, so the DB
+        // filename would change every launch. The result was that
+        // every relaunch created a brand-new sqlite file, the old
+        // ones piled up in Application Support, and stale rows that
+        // outlived a delete-while-app-closed could resurface in the
+        // graph because GC ran against a fresh DB instead of the one
+        // that held the stale row.
         let path = url.standardizedFileURL.path
-        var hasher = Hasher()
-        hasher.combine(path)
-        let value = UInt64(bitPattern: Int64(hasher.finalize()))
-        return String(value, radix: 16)
+        let digest = SHA256.hash(data: Data(path.utf8))
+        return digest.prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    /// Delete every sqlite (+ wal/shm) file in the Indexes directory
+    /// other than the one we're about to open. Old random-hash DBs
+    /// from previous builds are dead — they're never read again, and
+    /// keeping them around can lead to a stale row in an old DB
+    /// quietly outlasting a vault rebuild.
+    private static func cleanupOrphanIndexDatabases(keep: URL) {
+        let dir = keep.deletingLastPathComponent()
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let keepStem = keep.deletingPathExtension().lastPathComponent
+        for url in entries {
+            let stem = url.deletingPathExtension().lastPathComponent
+            // Preserve our DB and its sqlite sidecars (-wal, -shm).
+            if stem == keepStem { continue }
+            let ext = url.pathExtension.lowercased()
+            guard ext == "sqlite" || ext == "sqlite-wal" || ext == "sqlite-shm"
+            else { continue }
+            try? fm.removeItem(at: url)
+        }
     }
 }

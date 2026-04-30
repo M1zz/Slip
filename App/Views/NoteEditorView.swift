@@ -5,6 +5,7 @@ import SlipCore
 struct NoteEditorView: View {
     @EnvironmentObject var appState: AppState
     @State private var autosave: AnyCancellable?
+    @State private var seenLoadEpoch: Int = -1
     @FocusState private var titleFocused: Bool
 
     var body: some View {
@@ -26,6 +27,7 @@ struct NoteEditorView: View {
                         .padding(.top, 18)
                         .padding(.bottom, 6)
                         .onChange(of: appState.currentNoteTitle) { _, _ in
+                            guard !suppressLoadEcho() else { return }
                             debouncedSave()
                         }
 
@@ -42,6 +44,7 @@ struct NoteEditorView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
                     .onChange(of: appState.currentNoteTags) { _, _ in
+                        guard !suppressLoadEcho() else { return }
                         debouncedSave()
                     }
 
@@ -64,6 +67,7 @@ struct NoteEditorView: View {
                         }
                     )
                     .onChange(of: appState.currentNoteBody) { _, newBody in
+                        guard !suppressLoadEcho() else { return }
                         if shouldAutoExtractFrontmatter(newBody) {
                             extractFrontmatterFromBody(newBody)
                             // The state mutations above will fire onChange
@@ -126,10 +130,26 @@ struct NoteEditorView: View {
     }
 
     private func debouncedSave() {
+        // Mark dirty immediately so the toolbar status flips to
+        // "Unsaved" the moment a key is pressed; the actual write
+        // still waits 0.3s for typing to settle.
+        appState.saveState = .dirty
         autosave?.cancel()
         autosave = Just(())
             .delay(for: .seconds(0.3), scheduler: RunLoop.main)
             .sink { _ in appState.saveCurrentNote() }
+    }
+
+    /// Returns true when the current onChange fired because openNote
+    /// just swapped the editor's content, not because the user typed.
+    /// Lets us skip a phantom autosave (and the Unsaved → Saving →
+    /// Saved flicker on the toolbar) on every note open.
+    private func suppressLoadEcho() -> Bool {
+        if seenLoadEpoch != appState.noteLoadEpoch {
+            seenLoadEpoch = appState.noteLoadEpoch
+            return true
+        }
+        return false
     }
 
     // MARK: - Frontmatter import on paste

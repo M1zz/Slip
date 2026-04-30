@@ -41,6 +41,9 @@ final class AppState: ObservableObject {
     @Published var backlinks: [NoteID] = []
     @Published var rediscovery: [RediscoveryEngine.RediscoveryCard] = []
     @Published var titleByID: [NoteID: String] = [:]
+    /// id → ~140-char body snippet, refreshed alongside titleByID.
+    /// Drives the sidebar's two-line preview under each note title.
+    @Published var excerptByID: [NoteID: String] = [:]
     @Published var tags: [NoteIndex.TagCount] = []
     @Published var selectedTag: String? {
         didSet { applyTagFilter() }
@@ -58,6 +61,31 @@ final class AppState: ObservableObject {
     /// leave the open graph stuck on the old layout.
     @Published var graphRevision: Int = 0
 
+    /// Drives the ⌘P modal. Toggled by the menu item and dismissed by
+    /// the panel itself when a note is picked or Esc is pressed.
+    @Published var quickSwitcherVisible: Bool = false
+
+    /// Save lifecycle for the active note. Drives the small "Saved ·
+    /// just now" pill in the editor toolbar so users can see at a
+    /// glance that their typing has flushed to disk.
+    enum SaveState: Equatable {
+        case idle           // No active note (or nothing typed yet).
+        case dirty          // User typed; debounce hasn't fired.
+        case saving         // Write in progress.
+        case saved(Date)    // Last successful write timestamp.
+    }
+    @Published var saveState: SaveState = .idle
+
+    /// Bumped every time openNote / clearCurrentNoteState swaps the
+    /// editor's body. The editor's body-change observer compares this
+    /// to a local seen value; mismatch means the body change came
+    /// from a load, not from typing, so the autosave is suppressed.
+    /// Without this guard, opening any note would trigger a phantom
+    /// save (rewriting the file with identical content) and flicker
+    /// the toolbar status through Unsaved → Saving → Saved on every
+    /// open.
+    @Published private(set) var noteLoadEpoch: Int = 0
+
     /// Full list from the index; `noteList` reflects the current tag filter.
     private var allNoteIDs: [NoteID] = []
 
@@ -68,6 +96,19 @@ final class AppState: ObservableObject {
     /// the cloud sync brings it back, the watcher reports it, and the
     /// next indexer pass picks it up. Entries expire after 30 seconds.
     private var deletionTombstones: [NoteID: Date] = [:]
+
+    /// Snapshot of the most recently trashed note, kept in memory so
+    /// `undoLastDelete()` can re-create the file from the same content
+    /// instead of rummaging through the system Trash. Cleared once the
+    /// undo runs or another delete supersedes it. We don't persist
+    /// across launches — undo windows are an in-session affordance.
+    struct DeletedNoteSnapshot {
+        let id: NoteID
+        let url: URL
+        let content: String
+        let deletedAt: Date
+    }
+    @Published private(set) var lastDeletedNote: DeletedNoteSnapshot?
 
     // MARK: - Services
 
@@ -229,6 +270,8 @@ final class AppState: ObservableObject {
                     .filter { !blocked.contains($0.id) }
                     .map { ($0.id, $0.title) }
             )
+            self.excerptByID = (try? index.allExcerpts())?
+                .filter { !blocked.contains($0.key) } ?? [:]
             self.tags = (try? index.listTags()) ?? []
             self.allFolders = listFoldersOnDisk()
             self.allTodos = (try? index.allTodos()) ?? []
@@ -297,12 +340,20 @@ final class AppState: ObservableObject {
         let url = vault.url(for: id)
         let fullContent = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let parsed = Self.parseNote(fullContent)
+        self.noteLoadEpoch &+= 1
         self.currentNoteID = id
         self.currentNoteTitle = parsed.title
         self.currentNoteBody = parsed.body
         self.currentNoteTags = parsed.tags
         self.currentNoteExtraFrontmatter = parsed.extraFrontmatter
         self.backlinks = (try? index.backlinks(to: id)) ?? []
+        // Reset save state to a "saved" snapshot using the file's
+        // mtime so the toolbar shows accurate "saved Xs ago" text on
+        // open, instead of carrying the previous note's status over.
+        let mtime = (try? vault.url(for: id).resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate) ?? Date()
+        self.saveState = .saved(mtime)
         try? index.recordView(id: id)
     }
 
@@ -619,12 +670,20 @@ final class AppState: ObservableObject {
         // the explicit Move action, so the sidebar reflects the new
         // path right away.
         let writeURL = renameToMatchTitleIfNeeded(id: id, vault: vault)
+        saveState = .saving
         do {
             try writer.write(fullContent, to: writeURL)
             markInternalWrite(url: writeURL)
             reindexIncrementally([writeURL])
+            saveState = .saved(Date())
             NSLog("[Slip] saved \(writeURL.lastPathComponent) (\(fullContent.count) chars)")
         } catch {
+            // Drop back to .dirty so the toolbar shows "Unsaved" and
+            // the next debounce can retry. We don't need to surface
+            // the error message — the next successful write resolves
+            // it, and persistent failures are rare enough that the
+            // log is sufficient.
+            saveState = .dirty
             NSLog("[Slip] save failed: \(error)")
         }
     }
@@ -646,6 +705,56 @@ final class AppState: ObservableObject {
             NSLog("[Slip] create failed: \(error)")
         }
     }
+
+    /// Open today's daily note, creating it on demand. Filename is
+    /// the ISO date (YYYY-MM-DD.md) so the daily series sorts
+    /// chronologically in the sidebar and links across days work via
+    /// `[[2026-04-30]]`. Stored under the `Daily/` folder so the root
+    /// of the vault doesn't fill up with date files.
+    func openOrCreateDailyNote() {
+        guard let vault else { return }
+        flushPendingEdits()
+        let dateString = Self.dailyNoteDateFormatter.string(from: Date())
+        let folder = "Daily"
+        let id = NoteID(relativePath: "\(folder)/\(dateString).md")
+        // Open existing if either the index knows about it or the
+        // file is on disk (e.g. iCloud just dropped it in but the
+        // indexer hasn't caught up). Without the disk check we'd
+        // happily create "2026-05-01 2.md".
+        if allNoteIDs.contains(id) ||
+           FileManager.default.fileExists(atPath: vault.url(for: id).path) {
+            openNote(id)
+            return
+        }
+        // Body seed: just an H1 of the date so the note has a useful
+        // title even before the user types anything. They can replace
+        // it freely — the title field rebinds to whatever H1 they
+        // write, and the filename stays date-keyed regardless.
+        let seed = "# \(dateString)\n\n"
+        do {
+            let note = try writer.createNew(
+                in: vault, title: dateString, folder: folder, body: seed
+            )
+            markInternalWrite(url: note.url)
+            currentNoteID = note.id
+            currentNoteTitle = dateString
+            currentNoteBody = ""
+            currentNoteTags = []
+            currentNoteExtraFrontmatter = ""
+            reindexIncrementally([note.url])
+            NSLog("[Slip] opened daily note \(note.url.lastPathComponent)")
+        } catch {
+            NSLog("[Slip] daily note create failed: \(error)")
+        }
+    }
+
+    private static let dailyNoteDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        return f
+    }()
 
     func createFolder(name: String, in parent: String = "") {
         guard let vault else { return }
@@ -676,7 +785,13 @@ final class AppState: ObservableObject {
     func deleteNote(_ id: NoteID) {
         guard let vault else { return }
         let url = vault.url(for: id)
+        // If the note being deleted is currently open and has unsaved
+        // edits, flush first so the on-disk content we capture for
+        // undo matches what the user last typed.
+        if currentNoteID == id { flushPendingEdits() }
         markInternalWrite(url: url)
+
+        let priorContent = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
 
         if FileManager.default.fileExists(atPath: url.path) {
             do {
@@ -686,10 +801,45 @@ final class AppState: ObservableObject {
                 return
             }
         }
+        lastDeletedNote = DeletedNoteSnapshot(
+            id: id, url: url, content: priorContent, deletedAt: Date()
+        )
         dropFromState(id)
         deletionTombstones[id] = Date()
         reindexIncrementally([url])
         NSLog("[Slip] deleted \(url.lastPathComponent)")
+    }
+
+    /// Re-create the file for the most recently trashed note from the
+    /// in-memory snapshot. Idempotent on a stale snapshot — silently
+    /// no-ops if undoLastDelete is called twice or after a session
+    /// restart.
+    func undoLastDelete() {
+        guard let snapshot = lastDeletedNote else { return }
+        // Make sure the parent directory still exists; the user may
+        // have deleted the whole folder since the trash event.
+        let parent = snapshot.url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: parent, withIntermediateDirectories: true
+        )
+        markInternalWrite(url: snapshot.url)
+        do {
+            try snapshot.content.write(to: snapshot.url, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("[Slip] undo delete failed: \(error)")
+            return
+        }
+        // Clear the tombstone so the resurrected file isn't filtered
+        // back out by the next refreshAfterIndex pass.
+        deletionTombstones.removeValue(forKey: snapshot.id)
+        lastDeletedNote = nil
+        reindexIncrementally([snapshot.url])
+        // Reopen the restored note so the user lands back where they
+        // were before the accidental delete.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.openNote(snapshot.id)
+        }
+        NSLog("[Slip] restored \(snapshot.url.lastPathComponent)")
     }
 
     /// Move the note's file to a different folder under the vault.
@@ -763,6 +913,7 @@ final class AppState: ObservableObject {
     private func dropFromState(_ id: NoteID) {
         allNoteIDs.removeAll { $0 == id }
         titleByID.removeValue(forKey: id)
+        excerptByID.removeValue(forKey: id)
         searchResults.removeAll { $0 == id }
         backlinks.removeAll { $0 == id }
         allTodos.removeAll { $0.noteID == id }
@@ -782,6 +933,9 @@ final class AppState: ObservableObject {
         if let title = titleByID.removeValue(forKey: oldID) {
             titleByID[newID] = title
         }
+        if let excerpt = excerptByID.removeValue(forKey: oldID) {
+            excerptByID[newID] = excerpt
+        }
         if currentNoteID == oldID { currentNoteID = newID }
         // Old DB row will be replaced when reindex sees the new path; we
         // pre-emptively drop it so a racing refreshAfterIndex can't put
@@ -797,6 +951,7 @@ final class AppState: ObservableObject {
         currentNoteBody = ""
         currentNoteTags = []
         currentNoteExtraFrontmatter = ""
+        saveState = .idle
     }
 
     private func flushPendingEdits() {
@@ -832,16 +987,19 @@ final class AppState: ObservableObject {
     }
 
     /// Called by AppDelegate after Quick Capture commits — appends to today's daily note.
+    /// Routed through `Daily/` so the daily series matches the
+    /// folder layout that openOrCreateDailyNote uses; the previous
+    /// version put files at the vault root, which crowded the
+    /// sidebar's top level with dated stubs.
     func appendToDailyNote(_ text: String) {
         guard let vault else { return }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        let filename = formatter.string(from: Date()) + ".md"
-        let url = vault.root.appendingPathComponent(filename)
+        let dateString = Self.dailyNoteDateFormatter.string(from: Date())
+        let folder = vault.root.appendingPathComponent("Daily", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("\(dateString).md")
 
-        var entry = ""
         let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
-        entry += "- \(ts) \(text)"
+        let entry = "- \(ts) \(text)"
         do {
             try writer.append(entry, to: url)
             markInternalWrite(url: url)

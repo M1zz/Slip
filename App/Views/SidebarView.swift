@@ -378,20 +378,31 @@ private struct NewFolderSheet: View {
 // MARK: - Rows
 
 private struct NoteRow: View {
+    @EnvironmentObject var appState: AppState
     let id: NoteID
     let title: String
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: "doc.text")
                 .foregroundStyle(.secondary)
                 .font(.caption)
-            Text(title)
-                .lineLimit(1)
-                // Disable text selection so the Text doesn't intercept
-                // clicks (macOS 14+ Text is selectable by default and
-                // swallows the row's tap target).
-                .textSelection(.disabled)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .lineLimit(1)
+                    // Disable text selection so the Text doesn't intercept
+                    // clicks (macOS 14+ Text is selectable by default and
+                    // swallows the row's tap target).
+                    .textSelection(.disabled)
+                if let excerpt = appState.excerptByID[id], !excerpt.isEmpty {
+                    Text(excerpt)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .textSelection(.disabled)
+                }
+            }
             Spacer(minLength: 0)
         }
         // Stretch the row to the full sidebar width and make the entire

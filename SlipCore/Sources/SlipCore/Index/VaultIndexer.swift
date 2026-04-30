@@ -94,6 +94,7 @@ public final class VaultIndexer {
                     title: raw.title,
                     path: raw.url.path,
                     body: raw.body,
+                    excerpt: Self.makeExcerpt(body: raw.body, title: raw.title),
                     createdAt: raw.created,
                     modifiedAt: raw.modified,
                     bodyHash: hash,
@@ -209,6 +210,7 @@ public final class VaultIndexer {
                     title: title,
                     path: url.path,
                     body: body,
+                    excerpt: Self.makeExcerpt(body: body, title: title),
                     createdAt: created,
                     modifiedAt: modified,
                     bodyHash: hash,
@@ -219,6 +221,81 @@ public final class VaultIndexer {
                 try index.upsert(indexed)
             }
         }
+    }
+
+    /// Plain-text snippet for the sidebar preview. Skip frontmatter
+    /// and the title H1 so the row doesn't echo what's already in
+    /// the title; collapse markdown markers and inline links so the
+    /// preview reads as flat text. Capped at ~140 chars — enough to
+    /// see what the note is, short enough to stay one or two lines.
+    static func makeExcerpt(body: String, title: String) -> String {
+        var text = body
+        // Strip frontmatter block.
+        if text.hasPrefix("---\n"),
+           let close = text.range(
+                of: "\n---\n",
+                range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex
+           ) ?? text.range(
+                of: "\n---\r\n",
+                range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex
+           ) {
+            text = String(text[close.upperBound...])
+        }
+        // Walk lines, drop the title H1 if it's the first non-empty
+        // line, and emit a flattened version of subsequent lines.
+        var preview = ""
+        var skippedTitle = false
+        for line in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if !skippedTitle, trimmed.hasPrefix("# ") {
+                let h1 = trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)
+                if h1.lowercased() == title.lowercased() {
+                    skippedTitle = true
+                    continue
+                }
+                skippedTitle = true
+            }
+            let flat = Self.flattenMarkdown(trimmed)
+            if flat.isEmpty { continue }
+            if !preview.isEmpty { preview += " " }
+            preview += flat
+            if preview.count >= 140 { break }
+        }
+        if preview.count > 140 {
+            preview = String(preview.prefix(140)) + "…"
+        }
+        return preview
+    }
+
+    private static func flattenMarkdown(_ s: String) -> String {
+        var out = s
+        // Heading hashes / quote markers / list bullets.
+        while let first = out.first, "#>-*".contains(first) {
+            out = String(out.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        // Wikilinks: [[Title|Alias]] → Alias / Title
+        out = out.replacingOccurrences(
+            of: #"\[\[([^\[\]\|]+)\|([^\[\]]+)\]\]"#,
+            with: "$2",
+            options: .regularExpression
+        )
+        out = out.replacingOccurrences(
+            of: #"\[\[([^\[\]]+)\]\]"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        // Inline links: [label](url) → label
+        out = out.replacingOccurrences(
+            of: #"\[([^\[\]\n]+)\]\([^()\s]+\)"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        // Bold / italic / inline code markers.
+        out = out.replacingOccurrences(of: "**", with: "")
+        out = out.replacingOccurrences(of: "__", with: "")
+        out = out.replacingOccurrences(of: "`", with: "")
+        return out.trimmingCharacters(in: .whitespaces)
     }
 
     /// Remove index rows for `.md` files that no longer exist on disk.

@@ -96,6 +96,16 @@ public final class NoteIndex {
             """)
         }
 
+        // v3: snippet of body text for sidebar previews. Stored on
+        // the notes row instead of pulled from FTS at read time so
+        // the sidebar stays cheap to render even with thousands of
+        // notes — one DB round-trip per refresh, no per-row I/O.
+        migrator.registerMigration("v3_excerpt") { db in
+            try db.execute(sql: """
+                ALTER TABLE notes ADD COLUMN excerpt TEXT NOT NULL DEFAULT '';
+            """)
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -106,6 +116,7 @@ public final class NoteIndex {
         public let title: String
         public let path: String
         public let body: String
+        public let excerpt: String
         public let createdAt: Date
         public let modifiedAt: Date
         public let bodyHash: String
@@ -118,6 +129,7 @@ public final class NoteIndex {
             title: String,
             path: String,
             body: String,
+            excerpt: String,
             createdAt: Date,
             modifiedAt: Date,
             bodyHash: String,
@@ -126,6 +138,7 @@ public final class NoteIndex {
             todos: [TodoParser.ParsedTodo] = []
         ) {
             self.id = id; self.title = title; self.path = path; self.body = body
+            self.excerpt = excerpt
             self.createdAt = createdAt; self.modifiedAt = modifiedAt
             self.bodyHash = bodyHash; self.outgoingLinks = outgoingLinks
             self.tags = tags; self.todos = todos
@@ -144,17 +157,18 @@ public final class NoteIndex {
         try dbQueue.write { db in
             // 1. Notes row — preserve view tracking on update.
             try db.execute(sql: """
-                INSERT INTO notes (id, title, path, created_at, modified_at, body_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO notes (id, title, path, created_at, modified_at, body_hash, excerpt)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     path = excluded.path,
                     modified_at = excluded.modified_at,
-                    body_hash = excluded.body_hash
+                    body_hash = excluded.body_hash,
+                    excerpt = excluded.excerpt
             """, arguments: [
                 note.id.relativePath, note.title, note.path,
                 note.createdAt.timeIntervalSince1970, note.modifiedAt.timeIntervalSince1970,
-                note.bodyHash
+                note.bodyHash, note.excerpt
             ])
 
             // 2. FTS: delete by rowid (linked to notes.rowid), then reinsert.
@@ -396,6 +410,22 @@ public final class NoteIndex {
         public let incomingLinks: Int
         public let outgoingLinks: Int
         public let tags: [String]
+    }
+
+    /// id → excerpt map for sidebar previews. Empty string for any
+    /// note whose excerpt column is empty (e.g., a note with only a
+    /// title and no body).
+    public func allExcerpts() throws -> [NoteID: String] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT id, excerpt FROM notes")
+            var out: [NoteID: String] = [:]
+            for row in rows {
+                let id = NoteID(relativePath: row["id"])
+                let excerpt: String = row["excerpt"]
+                if !excerpt.isEmpty { out[id] = excerpt }
+            }
+            return out
+        }
     }
 
     public func allMetrics() throws -> [NoteMetrics] {

@@ -21,8 +21,18 @@ struct SlipApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Note") { appState.createNewNote() }
                     .keyboardShortcut("n")
+                Button("Today's Daily Note") { appState.openOrCreateDailyNote() }
+                    .keyboardShortcut("d", modifiers: [.command, .option])
                 Button("Quick Capture…") { appDelegate.showQuickCapture() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Divider()
+                Button("Quick Open…") { appState.quickSwitcherVisible = true }
+                    .keyboardShortcut("p")
+            }
+            CommandGroup(after: .undoRedo) {
+                Button("Restore Last Deleted Note") { appState.undoLastDelete() }
+                    .keyboardShortcut("z", modifiers: [.command, .option])
+                    .disabled(appState.lastDeletedNote == nil)
             }
             CommandMenu("Rediscover") {
                 Button("Today's Rediscovery") { appState.refreshRediscovery() }

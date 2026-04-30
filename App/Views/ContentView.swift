@@ -24,6 +24,9 @@ struct ContentView: View {
                         // `.primaryAction` lands on the top-right of the
                         // window, not inside the sidebar's toolbar area.
                         .toolbar {
+                            ToolbarItem(placement: .status) {
+                                SaveStatusView()
+                            }
                             ToolbarItemGroup(placement: .primaryAction) {
                                 Button {
                                     appState.requestInsertLink()
@@ -48,6 +51,9 @@ struct ContentView: View {
                                 }
                                 .help("Toggle Inspector")
                             }
+                        }
+                        .sheet(isPresented: $appState.quickSwitcherVisible) {
+                            QuickSwitcherView()
                         }
                 }
             }

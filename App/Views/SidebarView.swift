@@ -229,11 +229,17 @@ private struct SidebarTreeRow: View {
     @EnvironmentObject var appState: AppState
     let node: FileTreeNode
     let onRequestSubfolder: (String) -> Void
+    // Folders default to expanded so the user can see their notes
+    // immediately on launch without having to click each folder open.
+    // The previous .id() hammer that was rebuilding the List on
+    // every count change also reset DisclosureGroup state as a side
+    // effect; with the hammer gone, an explicit default is needed.
+    @State private var isExpanded: Bool = true
 
     var body: some View {
         switch node.kind {
         case .folder(let name, let path):
-            DisclosureGroup {
+            DisclosureGroup(isExpanded: $isExpanded) {
                 if let children = node.children {
                     ForEach(children, id: \.id) { child in
                         SidebarTreeRow(

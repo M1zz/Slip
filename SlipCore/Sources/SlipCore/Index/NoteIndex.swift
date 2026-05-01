@@ -106,6 +106,27 @@ public final class NoteIndex {
             """)
         }
 
+        // v4: recreate notes_fts as a regular FTS5 instead of
+        // `content=''`. SQLite refuses `DELETE FROM contentless_fts`
+        // (it requires a special INSERT-as-tombstone syntax we
+        // weren't using), and on recent macOS SQLite that error
+        // started bubbling up — every upsert was throwing inside
+        // fullReindex, the catch in activate() swallowed it, and
+        // the sidebar came up empty. Storing title+body inside
+        // FTS5 itself costs a bit more disk for a vault with lots
+        // of long notes, but DELETE/INSERT now work as written.
+        // The next fullReindex repopulates rows from the notes
+        // table, so search continues to work after the migration.
+        migrator.registerMigration("v4_fts_repair") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS notes_fts;")
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE notes_fts USING fts5(
+                    title, body,
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+            """)
+        }
+
         try migrator.migrate(dbQueue)
     }
 

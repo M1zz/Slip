@@ -8,6 +8,7 @@ struct SidebarView: View {
     @State private var notesExpanded: Bool = true
     @State private var tagsExpanded: Bool = true
     @State private var newFolderPrompt: NewFolderPrompt? = nil
+    @State private var renameFolderPrompt: RenameFolderPrompt? = nil
 
     private var displayed: [NoteID] {
         appState.searchQuery.isEmpty ? appState.noteList : appState.searchResults
@@ -54,6 +55,11 @@ struct SidebarView: View {
                             node: node,
                             onRequestSubfolder: { path in
                                 newFolderPrompt = NewFolderPrompt(parent: path)
+                            },
+                            onRequestRename: { path, name in
+                                renameFolderPrompt = RenameFolderPrompt(
+                                    path: path, currentName: name
+                                )
                             }
                         )
                     }
@@ -116,6 +122,13 @@ struct SidebarView: View {
         .sheet(item: $newFolderPrompt) { prompt in
             NewFolderSheet(parent: prompt.parent) { name in
                 appState.createFolder(name: name, in: prompt.parent)
+            }
+        }
+        .sheet(item: $renameFolderPrompt) { prompt in
+            RenameFolderSheet(
+                currentName: prompt.currentName
+            ) { newName in
+                appState.renameFolder(at: prompt.path, to: newName)
             }
         }
     }
@@ -229,6 +242,7 @@ private struct SidebarTreeRow: View {
     @EnvironmentObject var appState: AppState
     let node: FileTreeNode
     let onRequestSubfolder: (String) -> Void
+    let onRequestRename: (String, String) -> Void
     // Folders default to expanded so the user can see their notes
     // immediately on launch without having to click each folder open.
     // The previous .id() hammer that was rebuilding the List on
@@ -244,7 +258,8 @@ private struct SidebarTreeRow: View {
                     ForEach(children, id: \.id) { child in
                         SidebarTreeRow(
                             node: child,
-                            onRequestSubfolder: onRequestSubfolder
+                            onRequestSubfolder: onRequestSubfolder,
+                            onRequestRename: onRequestRename
                         )
                     }
                 }
@@ -258,6 +273,18 @@ private struct SidebarTreeRow: View {
                     }
                     Button("New Subfolder…") {
                         onRequestSubfolder(path)
+                    }
+                    Divider()
+                    Button("Rename…") {
+                        onRequestRename(path, name)
+                    }
+                    Button("Move Folder to Trash") {
+                        // Same animation context as the note delete
+                        // path so nested rows fade out instead of
+                        // snapping when their folder vanishes.
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) {
+                            appState.deleteFolder(at: path)
+                        }
                     }
                 }
             }
@@ -377,6 +404,56 @@ private struct NewFolderSheet: View {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         onCreate(trimmed)
+        dismiss()
+    }
+}
+
+// MARK: - Rename folder prompt
+
+private struct RenameFolderPrompt: Identifiable {
+    let id = UUID()
+    let path: String
+    let currentName: String
+}
+
+private struct RenameFolderSheet: View {
+    let currentName: String
+    let onRename: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename Folder")
+                .font(.headline)
+            TextField("Folder name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit { rename() }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Rename") { rename() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty
+                              || name == currentName)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .onAppear {
+            // Pre-fill with the current name so a small edit (typo
+            // fix, casing change) doesn't require retyping.
+            name = currentName
+            nameFocused = true
+        }
+    }
+
+    private func rename() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != currentName else { return }
+        onRename(trimmed)
         dismiss()
     }
 }

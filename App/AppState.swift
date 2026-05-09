@@ -777,6 +777,107 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Rename a folder on disk and rewrite every NoteID that lived
+    /// under its old path. Notes keep the same titles / bodies / DB
+    /// rows (modulo the path swap), so wikilinks and backlinks
+    /// pointing at them by title stay intact. Refuses if the
+    /// destination already exists, since `moveItem` would otherwise
+    /// throw and we'd leave the model half-updated.
+    func renameFolder(at oldPath: String, to newName: String) {
+        guard let vault else { return }
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanName = trimmed
+            .components(separatedBy: CharacterSet(charactersIn: "/\\?%*|\"<>:"))
+            .joined(separator: "-")
+        guard !cleanName.isEmpty else { return }
+
+        let parts = oldPath.split(separator: "/").map(String.init)
+        guard let oldName = parts.last else { return }
+        if oldName == cleanName { return }
+
+        let parentPath = parts.dropLast().joined(separator: "/")
+        let newPath = parentPath.isEmpty ? cleanName : "\(parentPath)/\(cleanName)"
+
+        let oldURL = vault.root.appendingPathComponent(oldPath)
+        let newURL = vault.root.appendingPathComponent(newPath)
+        if FileManager.default.fileExists(atPath: newURL.path) {
+            NSLog("[Slip] rename folder: \(newPath) already exists")
+            return
+        }
+
+        // If the active note lives inside this folder, flush so its
+        // on-disk content is current before we move the directory.
+        if let cur = currentNoteID,
+           cur.relativePath.hasPrefix("\(oldPath)/") {
+            flushPendingEdits()
+        }
+
+        let oldPrefix = "\(oldPath)/"
+        let affected = allNoteIDs.filter { $0.relativePath.hasPrefix(oldPrefix) }
+
+        markInternalWrite(url: oldURL)
+        markInternalWrite(url: newURL)
+        do {
+            try FileManager.default.moveItem(at: oldURL, to: newURL)
+        } catch {
+            NSLog("[Slip] folder rename failed: \(error)")
+            return
+        }
+
+        // Rewrite every nested NoteID. renameInState deletes the old
+        // DB row pre-emptively so a racing FSEvent reindex doesn't
+        // resurrect it under the old prefix.
+        var reindexURLs: [URL] = []
+        for oldID in affected {
+            let suffix = String(oldID.relativePath.dropFirst(oldPrefix.count))
+            let newID = NoteID(relativePath: "\(newPath)/\(suffix)")
+            renameInState(from: oldID, to: newID)
+            reindexURLs.append(oldURL.appendingPathComponent(suffix))
+            reindexURLs.append(newURL.appendingPathComponent(suffix))
+        }
+        self.allFolders = listFoldersOnDisk()
+        reindexIncrementally(reindexURLs)
+        NSLog("[Slip] renamed folder \(oldPath) → \(newPath)")
+    }
+
+    /// Move a folder (and everything inside) to the Trash. Drops
+    /// every nested note from the in-memory model and tombstones
+    /// each id so an iCloud / FSEvent echo can't resurrect them in
+    /// the next refresh pass. Recoverable from the system Trash.
+    func deleteFolder(at path: String) {
+        guard let vault else { return }
+        let url = vault.root.appendingPathComponent(path)
+
+        let prefix = "\(path)/"
+        let affected = allNoteIDs.filter { $0.relativePath.hasPrefix(prefix) }
+
+        if let cur = currentNoteID,
+           cur.relativePath.hasPrefix(prefix) {
+            flushPendingEdits()
+        }
+
+        markInternalWrite(url: url)
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try trashOrRemove(url: url)
+            } catch {
+                NSLog("[Slip] folder delete failed: \(error)")
+                return
+            }
+        }
+
+        let now = Date()
+        var staleURLs: [URL] = []
+        for id in affected {
+            staleURLs.append(vault.url(for: id))
+            dropFromState(id)
+            deletionTombstones[id] = now
+        }
+        self.allFolders = listFoldersOnDisk()
+        reindexIncrementally(staleURLs)
+        NSLog("[Slip] deleted folder \(path) (\(affected.count) notes)")
+    }
+
     /// Send the note's file to the system Trash, falling back to a
     /// permanent delete if Trash isn't usable for that path. Drops the
     /// note from every published surface, syncs the SQLite index, and

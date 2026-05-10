@@ -63,18 +63,17 @@ struct NoteEditorView: View {
                                 appState.savePastedImage(image)
                             }
                         },
+                        onFrontmatterPaste: { fullText in
+                            MainActor.assumeIsolated {
+                                promoteFrontmatterFromPaste(fullText)
+                            }
+                        },
                         onWikilinkClick: { target in
                             openTargetByTitle(target)
                         }
                     )
-                    .onChange(of: appState.currentNoteBody) { _, newBody in
+                    .onChange(of: appState.currentNoteBody) { _, _ in
                         guard !suppressLoadEcho() else { return }
-                        if shouldAutoExtractFrontmatter(newBody) {
-                            extractFrontmatterFromBody(newBody)
-                            // The state mutations above will fire onChange
-                            // again; that pass won't have a frontmatter
-                            // header anymore, so we won't loop.
-                        }
                         debouncedSave()
                     }
                 }
@@ -177,33 +176,26 @@ struct NoteEditorView: View {
 
     // MARK: - Frontmatter import on paste
 
-    /// Returns true when the body opens with a complete YAML frontmatter
-    /// block (e.g., a freshly-pasted Dev.to / Hugo / Jekyll post). We
-    /// require at least one `key:` line so a stray double-`---` isn't
-    /// mistaken for a heredoc.
-    private func shouldAutoExtractFrontmatter(_ body: String) -> Bool {
-        guard body.hasPrefix("---\n") else { return false }
-        let after = body.index(body.startIndex, offsetBy: 4)
-        // Same close-range logic as AppState.parseNote: \n---\n,
-        // \n---\r\n, or `\n---` at end-of-string. The EOF variant
-        // catches a bare frontmatter paste with no trailing newline,
-        // which otherwise sits in the body un-promoted.
-        var close: Range<String.Index>? =
-            body.range(of: "\n---\n", range: after..<body.endIndex)
-            ?? body.range(of: "\n---\r\n", range: after..<body.endIndex)
-        if close == nil,
-           body.hasSuffix("\n---"),
-           let suffix = body.range(of: "\n---", options: .backwards),
-           suffix.lowerBound >= after {
-            close = suffix
+    /// Called by MarkdownAwareTextView's paste handler with the full
+    /// pasted plain text when it starts with `---\n`. Promotes title /
+    /// tags / extra straight into AppState and returns just the body
+    /// portion for the editor to insert. Returning the original text
+    /// (parse failed) means we leave the paste alone and let the user
+    /// see the raw text — better than half-applying.
+    ///
+    /// Promotion is paste-only by design. The previous implementation
+    /// hooked onChange-of-body and ran the same extract every time
+    /// the body changed; that meant typing a literal frontmatter
+    /// block (`---\nti…`) would have its closing `---` trigger
+    /// extraction mid-keystroke and wipe the half-typed content.
+    private func promoteFrontmatterFromPaste(_ fullText: String) -> String? {
+        let parsed = AppState.parseNote(fullText)
+        // If parseNote couldn't find a close, parsed.body == fullText —
+        // bail and let the paste land verbatim.
+        if parsed.body == fullText && parsed.tags.isEmpty &&
+           parsed.title.isEmpty && parsed.extraFrontmatter.isEmpty {
+            return nil
         }
-        guard let close else { return false }
-        let fmText = String(body[after..<close.lowerBound])
-        return fmText.contains(":")
-    }
-
-    private func extractFrontmatterFromBody(_ body: String) {
-        let parsed = AppState.parseNote(body)
         if !parsed.title.isEmpty, appState.currentNoteTitle.isEmpty {
             appState.currentNoteTitle = parsed.title
         }
@@ -215,7 +207,7 @@ struct NoteEditorView: View {
         if !parsed.extraFrontmatter.isEmpty {
             appState.currentNoteExtraFrontmatter = parsed.extraFrontmatter
         }
-        appState.currentNoteBody = parsed.body
+        return parsed.body
     }
 }
 

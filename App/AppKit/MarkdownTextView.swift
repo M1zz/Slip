@@ -36,6 +36,13 @@ struct MarkdownTextView: NSViewRepresentable {
     /// (e.g. `_attachments/paste-...png`) — invoked when the user pastes an
     /// image. Returning nil falls back to plain-text paste.
     var onImagePaste: ((NSImage) -> String?)? = nil
+    /// Called when a paste's plain-text alternate starts with a YAML
+    /// frontmatter opener. The callback is responsible for promoting
+    /// title / tags / extra into AppState; it returns the body text
+    /// the editor should insert in place of the full paste (i.e.,
+    /// everything below the closing `---`). Returning nil leaves the
+    /// full text to be inserted unchanged.
+    var onFrontmatterPaste: ((String) -> String?)? = nil
     var onWikilinkClick: (String) -> Void = { _ in }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -75,6 +82,7 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.drawsBackground = true
 
         textView.onImagePaste = onImagePaste
+        textView.onFrontmatterPaste = onFrontmatterPaste
 
         scrollView.documentView = textView
 
@@ -89,6 +97,7 @@ struct MarkdownTextView: NSViewRepresentable {
         // Keep the paste callback in sync — closures captured at make time
         // get stale once SwiftUI re-renders with new dependencies.
         textView.onImagePaste = onImagePaste
+        textView.onFrontmatterPaste = onFrontmatterPaste
         // Only replace if the external binding diverged (e.g., switching notes).
         if textView.string != text {
             textView.string = text
@@ -468,6 +477,7 @@ enum Theme {
 final class MarkdownAwareTextView: NSTextView {
 
     var onImagePaste: ((NSImage) -> String?)?
+    var onFrontmatterPaste: ((String) -> String?)?
 
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
@@ -492,19 +502,22 @@ final class MarkdownAwareTextView: NSTextView {
             plain = plain.replacingOccurrences(of: "\r\n", with: "\n")
             if plain.hasPrefix("---\n") {
                 NSLog("[Slip] paste: frontmatter detected, len=\(plain.count)")
-                // Replace via textStorage + didChangeText explicitly.
-                // insertText(_:replacementRange:) is the NSTextInputClient
-                // entry point and doesn't reliably fire textDidChange,
-                // so the SwiftUI binding wouldn't see the new content
-                // and the auto-extract path never ran. Going through
-                // shouldChangeText / replaceCharacters / didChangeText
-                // matches the same pattern Coordinator.insertAtCursor
-                // uses for the ⌘K wikilink injection.
+                // Hand the full pasted text to the callback so it can
+                // extract title / tags / extra straight into AppState.
+                // The callback returns just the body portion (text
+                // below the closing `---`), which is what we actually
+                // insert into the editor — the frontmatter never
+                // appears in the body's textStorage. Doing it here
+                // instead of via an onChange-of-body observer means
+                // typing a frontmatter block manually doesn't trigger
+                // mid-keystroke extraction that wipes the user's
+                // half-typed content.
+                let toInsert = onFrontmatterPaste?(plain) ?? plain
                 let range = selectedRange()
-                if shouldChangeText(in: range, replacementString: plain) {
-                    textStorage?.replaceCharacters(in: range, with: plain)
+                if shouldChangeText(in: range, replacementString: toInsert) {
+                    textStorage?.replaceCharacters(in: range, with: toInsert)
                     didChangeText()
-                    let end = range.location + (plain as NSString).length
+                    let end = range.location + (toInsert as NSString).length
                     setSelectedRange(NSRange(location: end, length: 0))
                 }
                 return

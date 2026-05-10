@@ -52,6 +52,14 @@ final class AppState: ObservableObject {
     /// Drives both the empty-folder display in the sidebar tree and the
     /// "Move to…" submenu choices.
     @Published var allFolders: [String] = []
+    /// Per-folder manual ordering of note filenames, persisted to
+    /// `.slip-order.json` at the vault root. Each entry is a folder
+    /// path (empty string = vault root) → the user's chosen order
+    /// of filenames in that folder. Notes not in the list fall back
+    /// to localized alphabetical sort, *after* anything explicitly
+    /// ordered, so newly created notes don't shove pinned ones
+    /// around. Drag-and-drop in the sidebar mutates this map.
+    @Published private(set) var noteOrder: [String: [String]] = [:]
     /// Every `- [ ]` / `- [x]` task across the vault, refreshed whenever
     /// the index is rewritten. Drives the inspector's aggregated view.
     @Published var allTodos: [TodoItem] = []
@@ -196,6 +204,7 @@ final class AppState: ObservableObject {
         self.vault = vault
         self.index = index
         self.indexer = indexer
+        loadNoteOrder()
 
         Task.detached { [weak self] in
             do {
@@ -207,6 +216,91 @@ final class AppState: ObservableObject {
                 NSLog("Reindex failed: \(error)")
             }
         }
+    }
+
+    // MARK: - Manual note ordering
+
+    private static let orderFilename = ".slip-order.json"
+
+    private func orderFileURL() -> URL? {
+        guard let vault else { return nil }
+        return vault.root.appendingPathComponent(Self.orderFilename)
+    }
+
+    private func loadNoteOrder() {
+        guard let url = orderFileURL(),
+              let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([String: [String]].self, from: data)
+        else {
+            noteOrder = [:]
+            return
+        }
+        noteOrder = decoded
+    }
+
+    private func saveNoteOrder() {
+        guard let url = orderFileURL() else { return }
+        markInternalWrite(url: url)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(noteOrder) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Move `draggedID` so it appears just before `targetID` in the
+    /// sidebar. Same-folder only — cross-folder drops on a note are
+    /// ignored here (drop on the folder row instead, which moveNote
+    /// handles). Builds the order list lazily from the current
+    /// alphabetical fallback so a folder that's never been reordered
+    /// before doesn't lose its other notes when the first drag
+    /// happens.
+    func reorderNote(_ draggedID: NoteID, before targetID: NoteID) {
+        if draggedID == targetID { return }
+        let draggedFolder = (draggedID.relativePath as NSString).deletingLastPathComponent
+        let targetFolder = (targetID.relativePath as NSString).deletingLastPathComponent
+        guard draggedFolder == targetFolder else { return }
+
+        let key = draggedFolder
+        let draggedFile = (draggedID.relativePath as NSString).lastPathComponent
+        let targetFile = (targetID.relativePath as NSString).lastPathComponent
+
+        // Seed from alphabetically-sorted filenames in that folder so
+        // a folder with no prior order entry still gets its non-
+        // dragged notes laid out predictably.
+        var current = noteOrder[key] ?? []
+        let folderFiles = allNoteIDs
+            .filter { ($0.relativePath as NSString).deletingLastPathComponent == key }
+            .map { ($0.relativePath as NSString).lastPathComponent }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        for f in folderFiles where !current.contains(f) {
+            current.append(f)
+        }
+
+        current.removeAll { $0 == draggedFile }
+        if let idx = current.firstIndex(of: targetFile) {
+            current.insert(draggedFile, at: idx)
+        } else {
+            current.append(draggedFile)
+        }
+        noteOrder[key] = current
+        saveNoteOrder()
+    }
+
+    /// Drop a note's filename from any folder's order entry. Called
+    /// from the delete / move pipelines so the order map doesn't
+    /// accumulate stale ghosts.
+    private func forgetOrder(for id: NoteID) {
+        let folder = (id.relativePath as NSString).deletingLastPathComponent
+        let file = (id.relativePath as NSString).lastPathComponent
+        guard var entry = noteOrder[folder] else { return }
+        entry.removeAll { $0 == file }
+        if entry.isEmpty {
+            noteOrder.removeValue(forKey: folder)
+        } else {
+            noteOrder[folder] = entry
+        }
+        saveNoteOrder()
     }
 
     private func startWatching() {
@@ -1020,6 +1114,7 @@ final class AppState: ObservableObject {
         allTodos.removeAll { $0.noteID == id }
         if currentNoteID == id { clearCurrentNoteState() }
         try? index?.delete(id: id)
+        forgetOrder(for: id)
         applyTagFilter()
         graphRevision &+= 1
     }
@@ -1042,8 +1137,45 @@ final class AppState: ObservableObject {
         // pre-emptively drop it so a racing refreshAfterIndex can't put
         // the old id back into allNoteIDs.
         try? index?.delete(id: oldID)
+        // Update the manual-order map so a renamed/moved note keeps
+        // its slot (when staying inside its folder) or quietly drops
+        // out of the old folder's slot (when moved/renamed across).
+        rewriteOrderEntry(from: oldID, to: newID)
         applyTagFilter()
         graphRevision &+= 1
+    }
+
+    /// Move a filename within the order map to track a NoteID swap.
+    /// Same-folder rename: filename gets replaced in-place. Cross-
+    /// folder move: drop from the old folder's list (the new folder
+    /// just inherits whatever order it had). The order map keys on
+    /// folder + filename, so this keeps it coherent through every
+    /// move/rename without callers having to know about ordering.
+    private func rewriteOrderEntry(from oldID: NoteID, to newID: NoteID) {
+        let oldFolder = (oldID.relativePath as NSString).deletingLastPathComponent
+        let newFolder = (newID.relativePath as NSString).deletingLastPathComponent
+        let oldFile = (oldID.relativePath as NSString).lastPathComponent
+        let newFile = (newID.relativePath as NSString).lastPathComponent
+        var changed = false
+        if oldFolder == newFolder {
+            if var entry = noteOrder[oldFolder],
+               let i = entry.firstIndex(of: oldFile) {
+                entry[i] = newFile
+                noteOrder[oldFolder] = entry
+                changed = true
+            }
+        } else {
+            if var entry = noteOrder[oldFolder] {
+                let before = entry.count
+                entry.removeAll { $0 == oldFile }
+                if entry.count != before {
+                    if entry.isEmpty { noteOrder.removeValue(forKey: oldFolder) }
+                    else { noteOrder[oldFolder] = entry }
+                    changed = true
+                }
+            }
+        }
+        if changed { saveNoteOrder() }
     }
 
     private func clearCurrentNoteState() {

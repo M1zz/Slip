@@ -18,7 +18,8 @@ struct SidebarView: View {
         Self.buildTree(
             noteIDs: displayed,
             titleByID: appState.titleByID,
-            folders: appState.allFolders
+            folders: appState.allFolders,
+            noteOrder: appState.noteOrder
         )
     }
 
@@ -155,10 +156,14 @@ struct SidebarView: View {
     /// Build a folder/file tree from the flat list of note IDs and folder
     /// paths. Folders are pre-seeded from `folders` so that newly created
     /// empty folders show up before any note has been added to them.
+    /// `noteOrder` carries the user's manual drag-to-reorder positions
+    /// per folder; notes listed there go first in that order, anything
+    /// unlisted falls back to localized alphabetical sort below them.
     static func buildTree(
         noteIDs: [NoteID],
         titleByID: [NoteID: String],
-        folders: [String]
+        folders: [String],
+        noteOrder: [String: [String]]
     ) -> [FileTreeNode] {
         final class Branch {
             var subFolders: [String: Branch] = [:]
@@ -209,9 +214,30 @@ struct SidebarView: View {
                 let children = render(sub, parentPath: fullPath)
                 nodes.append(.folder(name: name, path: fullPath, children: children))
             }
-            for (id, title) in branch.notes.sorted(by: {
-                $0.title.localizedStandardCompare($1.title) == .orderedAscending
-            }) {
+
+            // Sort notes: anything in noteOrder[parentPath] keeps the
+            // user's chosen order; everything else falls below in
+            // localized alphabetical order. We compare by filename
+            // (last path component) since that's what the order map
+            // stores — independent of titles, which can change.
+            let orderList = noteOrder[parentPath] ?? []
+            let positionByFilename = Dictionary(
+                uniqueKeysWithValues: orderList.enumerated().map { ($0.element, $0.offset) }
+            )
+            let sortedNotes = branch.notes.sorted { a, b in
+                let aFile = (a.id.relativePath as NSString).lastPathComponent
+                let bFile = (b.id.relativePath as NSString).lastPathComponent
+                let aPos = positionByFilename[aFile]
+                let bPos = positionByFilename[bFile]
+                switch (aPos, bPos) {
+                case let (.some(ai), .some(bi)): return ai < bi
+                case (.some, .none): return true
+                case (.none, .some): return false
+                case (.none, .none):
+                    return a.title.localizedStandardCompare(b.title) == .orderedAscending
+                }
+            }
+            for (id, title) in sortedNotes {
                 nodes.append(.note(id: id, title: title))
             }
             return nodes
@@ -260,6 +286,10 @@ private struct SidebarTreeRow: View {
     // every count change also reset DisclosureGroup state as a side
     // effect; with the hammer gone, an explicit default is needed.
     @State private var isExpanded: Bool = true
+    /// True while another note is being dragged over this row, so we
+    /// can flash an insertion line at the top to make the drop point
+    /// (= "land just above this note") unambiguous before release.
+    @State private var isDropTargeted: Bool = false
 
     var body: some View {
         switch node.kind {
@@ -334,6 +364,22 @@ private struct SidebarTreeRow: View {
                     .combined(with: .scale(scale: 0.6, anchor: .leading))
                     .combined(with: .offset(x: -24, y: 0))
             ))
+            // Insertion-line cue at the top of a row that's a live
+            // drop target. Reads as "the dragged note will land here".
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(Color.accentColor)
+                    .frame(height: 2)
+                    .opacity(isDropTargeted ? 1 : 0)
+                    .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+            }
+            .onDrop(of: [.utf8PlainText], isTargeted: $isDropTargeted) { providers in
+                Self.handleNoteReorderDrop(
+                    providers: providers,
+                    before: id,
+                    appState: appState
+                )
+            }
             .contextMenu {
                 Menu("Move to") {
                     Button("Vault Root") {
@@ -371,6 +417,31 @@ private struct SidebarTreeRow: View {
                 NoteDragPreview(title: title)
             }
         }
+    }
+
+    /// Drag-from-note → drop-on-note reorder handler. Reads the
+    /// dragged NoteID's relative path out of the provider, then asks
+    /// AppState to move it just before the target. Same-folder only;
+    /// AppState ignores cross-folder reorder drops, so the user
+    /// drops on a folder row instead (which still moves the file).
+    private static func handleNoteReorderDrop(
+        providers: [NSItemProvider],
+        before targetID: NoteID,
+        appState: AppState
+    ) -> Bool {
+        var handled = false
+        for provider in providers {
+            guard provider.canLoadObject(ofClass: NSString.self) else { continue }
+            handled = true
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let s = object as? NSString else { return }
+                let draggedID = NoteID(relativePath: s as String)
+                Task { @MainActor in
+                    appState.reorderNote(draggedID, before: targetID)
+                }
+            }
+        }
+        return handled
     }
 
     private static func handleDrop(providers: [NSItemProvider], into folderPath: String,

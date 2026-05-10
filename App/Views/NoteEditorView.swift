@@ -33,6 +33,7 @@ struct NoteEditorView: View {
 
                     TagBar(
                         currentTags: appState.currentNoteTags,
+                        bodyTags: inlineBodyTags,
                         allTags: allTagSuggestions,
                         onAdd: { tag in
                             Task { @MainActor in addTag(tag) }
@@ -105,6 +106,28 @@ struct NoteEditorView: View {
     /// Tags that exist anywhere in the vault, for the add-tag autocomplete.
     private var allTagSuggestions: [String] {
         appState.tags.map(\.tag)
+    }
+
+    /// Tags discovered inline in the body (`#indiedev` etc.) that
+    /// aren't already promoted to the YAML frontmatter list. We
+    /// surface them in the TagBar so the user sees them recognized
+    /// without having to "+ Add tag" — they typed `#indiedev`, the
+    /// chip should appear. Frontmatter takes precedence: if the
+    /// same tag exists in both, only one chip shows up (as a
+    /// frontmatter chip with the X button).
+    private var inlineBodyTags: [String] {
+        let refs = WikilinkParser.references(in: appState.currentNoteBody)
+        let frontmatter = Set(appState.currentNoteTags)
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for ref in refs {
+            if case .tag(let t) = ref.kind {
+                if frontmatter.contains(t) || seen.contains(t) { continue }
+                seen.insert(t)
+                ordered.append(t)
+            }
+        }
+        return ordered
     }
 
     private func addTag(_ tag: String) {
@@ -189,6 +212,12 @@ struct NoteEditorView: View {
 
 private struct TagBar: View {
     let currentTags: [String]
+    /// Tags found inline in the body that aren't already in the
+    /// frontmatter list. Rendered as read-only "ghost" chips so the
+    /// user can see they're recognized; removing one means editing
+    /// the body, which is consistent — the source of truth for an
+    /// inline tag is the body text itself.
+    let bodyTags: [String]
     let allTags: [String]
     let onAdd: (String) -> Void
     let onRemove: (String) -> Void
@@ -202,6 +231,9 @@ private struct TagBar: View {
             HStack(spacing: 6) {
                 ForEach(currentTags, id: \.self) { tag in
                     TagChip(tag: tag, onRemove: { onRemove(tag) })
+                }
+                ForEach(bodyTags, id: \.self) { tag in
+                    BodyTagChip(tag: tag)
                 }
 
                 if editing {
@@ -321,5 +353,27 @@ private struct TagChip: View {
         .padding(.vertical, 3)
         .background(Capsule().fill(Color.accentColor.opacity(0.15)))
         .foregroundStyle(Color.accentColor)
+    }
+}
+
+/// Read-only chip for tags discovered inline in the body. Visually
+/// lighter than the regular TagChip and missing the X button so it's
+/// clear the source is the prose, not the frontmatter — to remove,
+/// edit the body. Uses an outline instead of a fill so a row of mixed
+/// chips (frontmatter + body) reads as two related but distinct
+/// kinds at a glance.
+private struct BodyTagChip: View {
+    let tag: String
+
+    var body: some View {
+        Text("#\(tag)")
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+            )
+            .foregroundStyle(Color.accentColor.opacity(0.85))
+            .help("Inline tag — edit the body to remove")
     }
 }

@@ -474,6 +474,24 @@ final class MarkdownAwareTextView: NSTextView {
         let types = pb.types ?? []
         NSLog("[Slip] paste types=\(types.map(\.rawValue))")
 
+        // 0. Markdown-source guard. When the plain-text alternate
+        //    starts with `---\n` (a YAML frontmatter opener), the user
+        //    is pasting raw markdown they want preserved verbatim.
+        //    Most rich-text sources (TextEdit, code editors with rich
+        //    selection, browser viewers of raw .md) ship an HTML
+        //    alternate alongside, and routing through the HTML →
+        //    markdown converter mangles the frontmatter — `---` gets
+        //    interpreted as a horizontal rule, paragraph wrappers
+        //    introduce blank lines between YAML keys, and the result
+        //    is no longer parseable as frontmatter. Skipping straight
+        //    to the plain-text path keeps it intact.
+        if let plain = pb.string(forType: .string),
+           plain.hasPrefix("---\n") {
+            NSLog("[Slip] paste: frontmatter detected, using plain text")
+            super.paste(sender)
+            return
+        }
+
         // 1. Rich text source — convert to markdown, preserving links.
         if types.contains(.html), let html = pb.string(forType: .html) {
             NSLog("[Slip] paste: HTML available, len=\(html.count)")

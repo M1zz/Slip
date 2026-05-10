@@ -184,8 +184,19 @@ struct NoteEditorView: View {
     private func shouldAutoExtractFrontmatter(_ body: String) -> Bool {
         guard body.hasPrefix("---\n") else { return false }
         let after = body.index(body.startIndex, offsetBy: 4)
-        let close = body.range(of: "\n---\n", range: after..<body.endIndex)
+        // Same close-range logic as AppState.parseNote: \n---\n,
+        // \n---\r\n, or `\n---` at end-of-string. The EOF variant
+        // catches a bare frontmatter paste with no trailing newline,
+        // which otherwise sits in the body un-promoted.
+        var close: Range<String.Index>? =
+            body.range(of: "\n---\n", range: after..<body.endIndex)
             ?? body.range(of: "\n---\r\n", range: after..<body.endIndex)
+        if close == nil,
+           body.hasSuffix("\n---"),
+           let suffix = body.range(of: "\n---", options: .backwards),
+           suffix.lowerBound >= after {
+            close = suffix
+        }
         guard let close else { return false }
         let fmText = String(body[after..<close.lowerBound])
         return fmText.contains(":")

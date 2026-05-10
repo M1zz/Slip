@@ -515,9 +515,20 @@ final class AppState: ObservableObject {
 
         if content.hasPrefix("---\n") {
             let afterOpen = content.index(content.startIndex, offsetBy: 4)
-            let closeRange =
+            // Accept the closing `---` followed by \n, \r\n, or
+            // end-of-string. Without the EOF case, pasting a bare
+            // frontmatter block (no trailing newline) parses as
+            // body text instead of getting promoted into title /
+            // tags / extra metadata.
+            var closeRange: Range<String.Index>? =
                 content.range(of: "\n---\n", range: afterOpen..<content.endIndex)
                 ?? content.range(of: "\n---\r\n", range: afterOpen..<content.endIndex)
+            if closeRange == nil,
+               content.hasSuffix("\n---"),
+               let nlIdx = content.range(of: "\n---", options: .backwards),
+               nlIdx.lowerBound >= afterOpen {
+                closeRange = nlIdx
+            }
             if let close = closeRange {
                 let fmText = String(content[afterOpen..<close.lowerBound])
                 let parsed = parseFrontmatter(fmText)

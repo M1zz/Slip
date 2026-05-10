@@ -319,12 +319,21 @@ public final class VaultIndexer {
     /// for a note.
     static func extractFrontmatterTags(body: String) -> [String] {
         guard body.hasPrefix("---\n") else { return [] }
-        guard let close = body.range(of: "\n---\n",
-                                     range: body.index(body.startIndex, offsetBy: 4)..<body.endIndex)
-            ?? body.range(of: "\n---\r\n",
-                          range: body.index(body.startIndex, offsetBy: 4)..<body.endIndex)
-        else { return [] }
-        let fmText = String(body[body.index(body.startIndex, offsetBy: 4)..<close.lowerBound])
+        let after = body.index(body.startIndex, offsetBy: 4)
+        var close: Range<String.Index>? =
+            body.range(of: "\n---\n", range: after..<body.endIndex)
+            ?? body.range(of: "\n---\r\n", range: after..<body.endIndex)
+        // Bare-block fallback: a file whose entire contents are
+        // just a frontmatter block (no trailing newline, no body)
+        // — usually a hand-written .md that someone is starting
+        // from a template. Still parse it.
+        if close == nil, body.hasSuffix("\n---"),
+           let suffix = body.range(of: "\n---", options: .backwards),
+           suffix.lowerBound >= after {
+            close = suffix
+        }
+        guard let close else { return [] }
+        let fmText = String(body[after..<close.lowerBound])
 
         let lines = fmText.components(separatedBy: "\n")
         for (i, line) in lines.enumerated() {
@@ -354,16 +363,28 @@ public final class VaultIndexer {
     }
 
     private static func extractTitle(body: String, fallbackFilename: String) -> String {
-        // 1. frontmatter `title:` key.
-        if body.hasPrefix("---\n"),
-           let end = body.range(of: "\n---\n") {
-            let fm = body[body.index(body.startIndex, offsetBy: 4)..<end.lowerBound]
-            for line in fm.split(whereSeparator: \.isNewline) {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.lowercased().hasPrefix("title:") {
-                    let value = trimmed.dropFirst("title:".count)
-                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
-                    if !value.isEmpty { return String(value) }
+        // 1. frontmatter `title:` key. Same close-range tolerance as
+        //    extractFrontmatterTags so a bare frontmatter block (no
+        //    trailing newline) still surfaces its title.
+        if body.hasPrefix("---\n") {
+            let after = body.index(body.startIndex, offsetBy: 4)
+            var end: Range<String.Index>? =
+                body.range(of: "\n---\n", range: after..<body.endIndex)
+                ?? body.range(of: "\n---\r\n", range: after..<body.endIndex)
+            if end == nil, body.hasSuffix("\n---"),
+               let suffix = body.range(of: "\n---", options: .backwards),
+               suffix.lowerBound >= after {
+                end = suffix
+            }
+            if let end {
+                let fm = body[after..<end.lowerBound]
+                for line in fm.split(whereSeparator: \.isNewline) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed.lowercased().hasPrefix("title:") {
+                        let value = trimmed.dropFirst("title:".count)
+                            .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                        if !value.isEmpty { return String(value) }
+                    }
                 }
             }
         }

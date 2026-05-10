@@ -340,8 +340,24 @@ public final class VaultIndexer {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard trimmed.lowercased().hasPrefix("tags:") else { continue }
             let value = trimmed.dropFirst("tags:".count).trimmingCharacters(in: .whitespaces)
-            if value.hasPrefix("[") && value.hasSuffix("]") {
-                return value.dropFirst().dropLast()
+            // Three accepted forms:
+            //   tags: [a, b, c]       — flow / bracketed
+            //   tags: a, b, c         — bare CSV (Dev.to / Substack export)
+            //   tags:                 — block form on subsequent `- item` lines
+            //     - a
+            //     - b
+            // Older code only handled the bracketed and block forms, so a
+            // post pasted with bare-CSV tags landed in YAML but never made
+            // it into the index — sidebar tag list missed them and the
+            // graph wouldn't cluster them.
+            if !value.isEmpty {
+                if value.hasPrefix("[") && value.hasSuffix("]") {
+                    return value.dropFirst().dropLast()
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
+                        .filter { !$0.isEmpty }
+                }
+                return value
                     .split(separator: ",")
                     .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }
                     .filter { !$0.isEmpty }
@@ -362,7 +378,7 @@ public final class VaultIndexer {
         return []
     }
 
-    private static func extractTitle(body: String, fallbackFilename: String) -> String {
+    static func extractTitle(body: String, fallbackFilename: String) -> String {
         // 1. frontmatter `title:` key. Same close-range tolerance as
         //    extractFrontmatterTags so a bare frontmatter block (no
         //    trailing newline) still surfaces its title.

@@ -491,13 +491,22 @@ final class MarkdownAwareTextView: NSTextView {
             if plain.hasPrefix("\u{FEFF}") { plain = String(plain.dropFirst()) }
             plain = plain.replacingOccurrences(of: "\r\n", with: "\n")
             if plain.hasPrefix("---\n") {
-                NSLog("[Slip] paste: frontmatter detected, inserting plain text")
-                // Insert the normalized text directly — calling
-                // super.paste would re-enter NSTextView's paste path,
-                // which prefers rich formats over plain text and would
-                // bring HTML back through the very converter we're
-                // trying to skip.
-                insertText(plain, replacementRange: selectedRange())
+                NSLog("[Slip] paste: frontmatter detected, len=\(plain.count)")
+                // Replace via textStorage + didChangeText explicitly.
+                // insertText(_:replacementRange:) is the NSTextInputClient
+                // entry point and doesn't reliably fire textDidChange,
+                // so the SwiftUI binding wouldn't see the new content
+                // and the auto-extract path never ran. Going through
+                // shouldChangeText / replaceCharacters / didChangeText
+                // matches the same pattern Coordinator.insertAtCursor
+                // uses for the ⌘K wikilink injection.
+                let range = selectedRange()
+                if shouldChangeText(in: range, replacementString: plain) {
+                    textStorage?.replaceCharacters(in: range, with: plain)
+                    didChangeText()
+                    let end = range.location + (plain as NSString).length
+                    setSelectedRange(NSRange(location: end, length: 0))
+                }
                 return
             }
         }

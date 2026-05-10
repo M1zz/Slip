@@ -485,11 +485,21 @@ final class MarkdownAwareTextView: NSTextView {
         //    introduce blank lines between YAML keys, and the result
         //    is no longer parseable as frontmatter. Skipping straight
         //    to the plain-text path keeps it intact.
-        if let plain = pb.string(forType: .string),
-           plain.hasPrefix("---\n") {
-            NSLog("[Slip] paste: frontmatter detected, using plain text")
-            super.paste(sender)
-            return
+        if var plain = pb.string(forType: .string) {
+            // Strip BOM and normalize Windows line endings so the
+            // prefix test works for any source's plain-text alternate.
+            if plain.hasPrefix("\u{FEFF}") { plain = String(plain.dropFirst()) }
+            plain = plain.replacingOccurrences(of: "\r\n", with: "\n")
+            if plain.hasPrefix("---\n") {
+                NSLog("[Slip] paste: frontmatter detected, inserting plain text")
+                // Insert the normalized text directly — calling
+                // super.paste would re-enter NSTextView's paste path,
+                // which prefers rich formats over plain text and would
+                // bring HTML back through the very converter we're
+                // trying to skip.
+                insertText(plain, replacementRange: selectedRange())
+                return
+            }
         }
 
         // 1. Rich text source — convert to markdown, preserving links.

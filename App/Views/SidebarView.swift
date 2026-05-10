@@ -103,6 +103,12 @@ struct SidebarView: View {
                        value: appState.noteList)
             .animation(.spring(response: 0.32, dampingFraction: 0.82),
                        value: appState.searchResults)
+            // Folder rows live in a separate published surface
+            // (allFolders, listed off disk) — without keying the
+            // animation on it too, create / delete of an empty
+            // folder would snap into place with no visible feedback.
+            .animation(.spring(response: 0.32, dampingFraction: 0.82),
+                       value: appState.allFolders)
         }
         .toolbar {
             ToolbarItemGroup {
@@ -121,7 +127,12 @@ struct SidebarView: View {
         }
         .sheet(item: $newFolderPrompt) { prompt in
             NewFolderSheet(parent: prompt.parent) { name in
-                appState.createFolder(name: name, in: prompt.parent)
+                // Same spring as the note create path, so a brand-
+                // new folder slides into the sidebar instead of
+                // popping in.
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) {
+                    appState.createFolder(name: name, in: prompt.parent)
+                }
             }
         }
         .sheet(item: $renameFolderPrompt) { prompt in
@@ -267,6 +278,21 @@ private struct SidebarTreeRow: View {
                 FolderDropZone(name: name) { providers in
                     Self.handleDrop(providers: providers, into: path, appState: appState)
                 }
+                // Match the note-row transition so create + delete
+                // feel consistent across both kinds of sidebar
+                // entries: new folders glide in from the top, deleted
+                // folders fade and shrink toward the leading edge.
+                // Attached to the label rather than the whole
+                // DisclosureGroup so children of an expanded folder
+                // also tween — otherwise nested rows would snap.
+                .transition(.asymmetric(
+                    insertion: .move(edge: .top)
+                        .combined(with: .opacity)
+                        .combined(with: .scale(scale: 0.92, anchor: .top)),
+                    removal: .opacity
+                        .combined(with: .scale(scale: 0.6, anchor: .leading))
+                        .combined(with: .offset(x: -24, y: 0))
+                ))
                 .contextMenu {
                     Button("New Note Here") {
                         Task { @MainActor in appState.createNewNote(in: path) }
